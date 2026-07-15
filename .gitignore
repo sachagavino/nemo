@@ -1,0 +1,21 @@
+# build artefacts
+build/
+bin/
+*.o
+*.mod
+
+# run artefacts
+*.out
+*.tmp
+!species.out
+ab/
+ml/
+struct/
+
+# python
+__pycache__/
+*.pyc
+
+# editors / OS
+.DS_Store
+*.swp
