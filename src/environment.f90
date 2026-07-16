@@ -82,7 +82,7 @@ end subroutine get_grain_temperature_gas
 !> @brief Grain temperature set per size bin.
 !!
 !! In this extraction stage the per-bin values are still whatever was loaded
-!! into grain_temp(:) at init (i.e. the 3rd column of 0D_grain_sizes.in), so
+!! into grain_temp(:) at init (tabulated path: 3rd column of dust_grid_table.in), so
 !! that the skeleton reproduces nmgc-2.0 exactly.
 !!
 !! STAGE 3: this becomes a real physical statement, Td = Td(a), evaluated once
@@ -112,5 +112,42 @@ subroutine get_grain_temperature_fixed_to_dust_size(time, gas_temperature, av, g
 
   return
 end subroutine get_grain_temperature_fixed_to_dust_size
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Named size->temperature prescriptions, evaluated ONCE on the grid at
+!! init (constant per bin, fixed in time for now). This is what makes
+!! fixed_to_dust_size on a DERIVED grid a real physical statement Td = Td(a)
+!! rather than a table read. On a tabulated grid the per-bin temperatures come
+!! from dust_grid_table.in instead and this evaluator is not called.
+!!
+!! Default prescription: the ad-hoc Td ~ a^(-1/6) scaling that nmgc-2.0 buried
+!! in the main.f90 time loop, promoted here and anchored to an explicit
+!! reference: Td(a) = reference_dust_temperature * (a/reference_grain_radius)^(-1/6).
+!! T_CR,peak(a) is uniform for now (= cr_peak_grain_temp); the hook is here to
+!! make it size-dependent later.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+pure function td_of_a(a) result(td)
+  implicit none
+  real(double_precision), intent(in) :: a !<[in] grain radius [cm]
+  real(double_precision) :: td !< dust temperature [K]
+  td = reference_dust_temperature * (a/reference_grain_radius)**(-1.d0/6.d0)
+end function td_of_a
+
+pure function tcr_peak_of_a(a) result(tcr)
+  implicit none
+  real(double_precision), intent(in) :: a !<[in] grain radius [cm]
+  real(double_precision) :: tcr !< CR peak grain temperature [K]
+  tcr = cr_peak_grain_temp   ! uniform for now; size-dependent hook
+end function tcr_peak_of_a
+
+subroutine evaluate_dust_temperature_prescriptions()
+  implicit none
+  integer :: i
+  do i=1,nb_grains
+    grain_temp(i)              = td_of_a(grain_radii(i))
+    CR_PEAK_GRAIN_TEMP_all(i)  = tcr_peak_of_a(grain_radii(i))
+  enddo
+  return
+end subroutine evaluate_dust_temperature_prescriptions
 
 end module environment

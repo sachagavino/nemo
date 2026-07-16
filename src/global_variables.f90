@@ -18,6 +18,23 @@ implicit none
 ! integer, parameter     :: nb_grains=1
 integer                  :: nb_grains
 real(double_precision),allocatable, dimension(:):: grain_radii,grain_temp
+!> Dust size grid (stage 3). radius_grid is an alias kept for clarity in the
+!! dust code; grain_radii remains the canonical array the chemistry consumes.
+real(double_precision), allocatable, dimension(:) :: mass_grid   !< [g] representative grain mass per bin
+!> Derived-grid geometry (see dust_grid.f90). These define the grid; the
+!! initial distribution (dust_ic) and the Td(a)/T_CR,peak(a) maps populate it.
+real(double_precision)   :: a_min = 5.d-7           !< [cm] smallest representative grain radius (5 nm)
+real(double_precision)   :: a_max = 5.d-5           !< [cm] largest representative grain radius (0.5 um)
+real(double_precision)   :: mass_ratio = 2.d0      !< [no unit] per-bin mass ratio m_{k+1}/m_k (<= 2; default 2)
+real(double_precision)   :: dust_power_law_index = -3.5d0 !< [no unit] MRN exponent dn/da ~ a^index
+character(len=80)        :: dust_grid_source = 'derived'    !< 'derived' or 'tabulated'
+character(len=80)        :: dust_ic = 'MRN'                 !< 'MRN' or 'tabulated'
+!> Top-bin sink (grid property, baked in now so coagulation does not retrofit it).
+!! Mass a top-bin self-collision scatters above m_N has nowhere to go on the grid;
+!! coagulation will route it here. It accumulates but never re-collides. A
+!! non-negligible value at runtime means a_max is too low. Purely diagnostic in
+!! stage 3 (no dynamics yet).
+real(double_precision)   :: dust_mass_sink = 0.d0 !< [g per H] mass accumulated above m_N
 integer                  :: stdo, ffli
 ! real(double_precision), dimension(1:):: grain_radii
 ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a
@@ -226,8 +243,11 @@ real(double_precision), allocatable, dimension(:) :: GTODN !< Gas to dust number
 real(double_precision)                         :: GTODN_FIXED !< it is used for cases when we dont want to use grain size distribution
 !integer                                        :: is_dust_MRN ! 1 =  distribution; 0 = WD distribution. (for specific case of WD see subroutine GRAIN_DIST(INDEX,DTYPE,A,DNDA))
 real(double_precision) :: AV_NH_ratio !< Extinction over total hydrogen column density [mag/cm-2]
-real(double_precision) :: grain_radius !< Grain radius [cm] 
+real(double_precision) :: reference_grain_radius = 1.d-5 !< [cm] reference grain radius: single effective grain for
+!! is_grain_reactions=0, and reference radius a_ref for the Td(a) prescription.
 real(double_precision) :: GRAIN_DENSITY !< grain density [g/cm^3]
+real(double_precision) :: reference_dust_temperature = 1.d1 !< [K] dust temperature at reference_grain_radius,
+!! used as T_ref by the size-scaled Td(a) prescription (fixed_to_dust_size, derived grid).
 real(double_precision) :: sticking_coeff_neutral  !< sticking coefficient for neutral  species on grain surface [no unit]
 real(double_precision) :: sticking_coeff_positive !< sticking coefficient for positive species on grain surface [no unit]
 real(double_precision) :: sticking_coeff_negative !< sticking coefficient for negative species on grain surface [no unit]
@@ -269,7 +289,7 @@ real(double_precision) :: visual_extinction !< visual extinction [mag] of the mo
 real(double_precision), dimension(:), allocatable :: dust_temperature !< dim(nb_grains) current dust temperature [K]
 real(double_precision), dimension(:), allocatable :: tmp_grain_temperature !< Grain temperature [K]
 real(double_precision) :: H_number_density !< [part/cm^3] Total H number density (both H and H2), representing the total gas density
-real(double_precision), dimension(:), allocatable :: GTODN_0D !< dim(nb_grains) [no unit] Gas to dust density number ratio read in the 0D_grain_sizes.in file.
+real(double_precision), dimension(:), allocatable :: GTODN_0D !< dim(nb_grains) [no unit] gas-to-dust number ratio (tabulated path: from dust_grid_table.in).
 real(double_precision), dimension(:), allocatable :: GTODN_0D_temp  !< same as GTODN_0D but for temp storing data
 
 

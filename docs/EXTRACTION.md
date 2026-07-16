@@ -25,8 +25,9 @@ case (see `tests/reference_0D_2grains/`):
 * the multi-grain template-replication scheme in `read_species` / `read_reactions`
 * `is_er_cir` and `is_crid`: dormant (default 0) but fully wired
 * the 3-phase path (`is_3_phase = 1`): kept, not burned. v1 is 2-phase.
-* `get_MRN_distribution` in `input_output.f90` — unused today, it is most of
-  the analytic dust IC that stage 3 needs.
+* `get_MRN_distribution` in `input_output.f90` — the seed of the analytic dust
+  IC. Stage 3 rewrote it into `dust_grid.f90` (`dust_ic_mrn`), correctly
+  normalised by `initial_dtg_mass_ratio`; see `docs/STAGE3_GRID.md`.
 
 ## Removed
 
@@ -119,8 +120,9 @@ Deliberately kept — these were *not* single-grain-specific, despite living nea
   stage 3.
 * **`grain_radius`** feeds `GTODN_FIXED`, the single effective grain used on the
   `is_grain_reactions = 0` H2-formation fallback (reachable with a resolved size
-  distribution too), and is the reference radius for the future Td(a) map. It
-  should be renamed `reference_grain_radius` at stage 3.
+  distribution too), and is the reference radius for the Td(a) map. Stage 3
+  renamed it `reference_grain_radius` (legacy `grain_radius` / `RD` still
+  accepted on input).
 
 `parameters.in` was also rewritten: it had never been cleaned after stage 1 and
 still carried the raw reference keys. Dropped now: `structure_type`,

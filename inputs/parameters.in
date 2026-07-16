@@ -50,6 +50,22 @@ x_ionisation_rate =  0.000E+00 ! Ionisation rate due to X-rays [s-1]
 uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference flux (1.=nominal)
 
 !*****************************
+!*   Dust grid               *
+!*****************************
+! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
+! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
+dust_grid_source = derived ! derived | tabulated
+a_min =  5.000E-07 ! [cm] smallest representative grain radius (5 nm)
+a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)
+mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins derived from it
+
+!*****************************
+!*   Dust initial condition  *
+!*****************************
+dust_ic = MRN ! MRN | tabulated
+dust_power_law_index = -3.500E+00 ! dn/da ~ a^index (-3.5 = MRN); normalised by initial_dtg_mass_ratio
+
+!*****************************
 !*      Grain parameters     *
 !*****************************
 ! The size grid, the initial dust distribution, and the Td(a)/T_CR,peak(a) maps
@@ -62,7 +78,8 @@ sticking_coeff_neutral =  1.000E+00 ! sticking coeff for neutral species
 sticking_coeff_positive =  0.000E+00 ! sticking coeff for positive species
 sticking_coeff_negative =  0.000E+00 ! sticking coeff for negative species
 grain_density =  3.000E+00 ! mass density of grain material
-grain_radius =  1.000E-05 ! reference grain radius [cm]: single effective grain for is_grain_reactions=0, and reference radius for Td(a)
+reference_grain_radius =  1.000E-05 ! reference grain radius [cm]: single effective grain for is_grain_reactions=0, and a_ref for Td(a)
+reference_dust_temperature =  1.000E+01 ! [K] Td at reference_grain_radius; T_ref for the size-scaled Td(a) prescription
 diffusion_barrier_thickness =  1.000E-08 ! Barrier thickness [cm]
 surface_site_density =  8.000E+14 ! site density on one grain [cm-2]
 diff_binding_ratio_surf =  4.000E-01 ! Ratio used to compute DIFFUSION_BARRIER from BINDING_ENERGY if not known (surface species)

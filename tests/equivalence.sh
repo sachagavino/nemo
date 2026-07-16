@@ -30,19 +30,29 @@ for side in ref new; do
   cp "$CASE"/*.in "$WORK/$side/"
 done
 
-# the reference still needs the parameters the skeleton has dropped
+# The dust grid table: NEMO reads dust_grid_table.in, the reference reads the
+# legacy 0D_grain_sizes.in. Same bytes, two names.
+cp "$CASE/dust_grid_table.in" "$WORK/ref/0D_grain_sizes.in"
+rm -f "$WORK/ref/dust_grid_table.in"
+
+# the reference still needs the parameters NEMO has dropped
 cp "$REF_REPO/inputs/parameters.in" "$WORK/ref/parameters.in"
 python3 - "$WORK/ref/parameters.in" "$CASE/parameters.in" <<'PY'
 import re, sys
 ref, case = sys.argv[1], sys.argv[2]
 s = open(ref).read()
+# keys NEMO has that the reference also understands (skip NEMO-only dust keys)
+ref_only_skip = {'dust_grid_source', 'dust_ic', 'a_min', 'a_max', 'mass_ratio',
+                 'dust_power_law_index', 'reference_grain_radius', 'reference_dust_temperature'}
 for line in open(case):
     if '=' not in line or line.lstrip().startswith('!'):
         continue
     k = line.split('=')[0].strip()
     v = line.split('=')[1].split('!')[0].strip()
+    if k in ref_only_skip:
+        continue
     s = re.sub(r'(?m)^(%s\s*=\s*)\S+' % re.escape(k), lambda m: m.group(1) + v, s, count=1)
-# the reference needs these; the skeleton does not have them any more
+# the reference needs these; NEMO does not have them any more
 s = re.sub(r'(?m)^(structure_type\s*=\s*)\S+',      r'\g<1>0D', s)
 s = re.sub(r'(?m)^(spatial_resolution\s*=\s*)\S+',  r'\g<1>1',  s)
 open(ref, 'w').write(s)

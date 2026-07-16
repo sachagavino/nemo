@@ -1,0 +1,13 @@
+! dust_grid_table.in -- tabulated dust grid + IC (alternate to the derived grid).
+! Used when dust_grid_source = tabulated and/or dust_ic = tabulated: the
+! regression against nmgc-2.0 runs through this path, and restarts / external
+! (DustPy, mcdust) hand-offs will land here. The derived grid in parameters.in
+! is the primary science path.
+!
+! columns: grain-radius [cm]  1/abundance  Td [K]  T_CR,peak [K]  rank
+2.3265E-06  8.772881E+10  2.824846E+01    73      1            !
+1.0404E-03  1.970458E+17  1.781489E+01    73      2            !
+2.3265E-06  8.772881E+10  2.824846E+01    73      3            !
+1.0404E-03  1.970458E+17  1.781489E+01    73      4            !
+2.3265E-06  8.772881E+10  2.824846E+01    73      5            !
+1.0404E-03  1.970458E+17  1.781489E+01    73      6            !

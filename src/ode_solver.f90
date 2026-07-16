@@ -855,7 +855,8 @@ end subroutine get_temporal_derivatives
 
   do J=type_id_start(16),type_id_stop(16)
    
-    FE_IONISATION_RATE_r_dpnt=FE_IONISATION_RATE*grain_radii(GRAIN_RANK(J))*grain_radii(GRAIN_RANK(J))/(grain_radius*grain_radius)
+    FE_IONISATION_RATE_r_dpnt=FE_IONISATION_RATE*grain_radii(GRAIN_RANK(J))*grain_radii(GRAIN_RANK(J)) &
+                             /(reference_grain_radius*reference_grain_radius)
     
 !     if (grain_radii(GRAIN_RANK(J)) < 1e-5) then
 !       CR_PEAK_DURATION = 1.0d-5/(nb_sites_per_grain(GRAIN_RANK(J))/1.0d6)
@@ -925,7 +926,7 @@ end subroutine get_temporal_derivatives
       
       THERMAL_HOPING_RATE(K)=VIBRATION_FREQUENCY(K)*EXP(-DIFFUSION_BARRIER(K)/actual_dust_temp(ic_i))/nb_sites_per_grain(ic_i)
       CR_HOPING_RATE(K)=VIBRATION_FREQUENCY(K)*EXP(-DIFFUSION_BARRIER(K)/CR_PEAK_GRAIN_TEMP_all(ic_i))/nb_sites_per_grain(ic_i)*&
-      (CR_IONISATION_RATE / 1.3D-17) * (FE_IONISATION_RATE*grain_radii(ic_i)**2/grain_radius**2) * CR_PEAK_DURATION
+      (CR_IONISATION_RATE / 1.3D-17) * (FE_IONISATION_RATE*grain_radii(ic_i)**2/reference_grain_radius**2) * CR_PEAK_DURATION
       if (is_crid.NE.0) THERMAL_HOPING_RATE(K)=VIBRATION_FREQUENCY(K)*EXP(-DIFFUSION_BARRIER(K)/actual_dust_temp(ic_i)) &
                       /nb_sites_per_grain(ic_i) + CR_HOPING_RATE(K)
     endif  

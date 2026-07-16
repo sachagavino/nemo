@@ -129,15 +129,15 @@ enddo
 ! ---NOW COMPUTE THE GRAIN ABUNDANCE---
 !! HOOK (stage 3): this is where the dust initial condition will be set, from
 !! its own IC input parallel to abundances.in: either analytic (dust_ic = MRN,
-!! normalised by initial_dtg_mass_ratio, cf. get_MRN_distribution) or tabulated
+!! normalised by initial_dtg_mass_ratio, cf. dust_grid:dust_ic_mrn) or tabulated
 !! (dust_abundances.in, one n_k per bin, for restarts).
 GTODN = 0.d0
 
 ! GTODN_FIXED: gas-to-dust number ratio of a single effective grain of the
 ! reference radius. Used only on the is_grain_reactions=0 H2-formation fallback,
-! where the size distribution is not resolved. grain_radius survives as that
+! where the size distribution is not resolved. reference_grain_radius is that
 ! reference radius (and, at stage 3, as the reference radius of the Td(a) map).
-GTODN_FIXED = (4.d0 * PI * GRAIN_DENSITY * grain_radius * grain_radius * grain_radius) / (3.d0*initial_dtg_mass_ratio*AMU)
+GTODN_FIXED = (4.d0 * PI * GRAIN_DENSITY * reference_grain_radius**3) / (3.d0*initial_dtg_mass_ratio*AMU)
 
 GTODN(:) = GTODN_0D_temp(:)
 do i=1,nb_grains

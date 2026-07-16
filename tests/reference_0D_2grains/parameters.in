@@ -21,7 +21,9 @@ grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
 ! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
 ! gas: Tgrain = Tgas.
 is_grain_reactions = 1 ! Accretion, grain surface reactions
-multi_grain = 1 ! no-op for the skeleton; required by the reference nmgc-2.0 in equivalence.sh
+multi_grain = 1 ! no-op for NEMO; required by the reference nmgc-2.0 in equivalence.sh
+dust_grid_source = tabulated ! reproduce the reference's 2-bin grid exactly (a mass_ratio<=2 derivation cannot)
+dust_ic = tabulated ! reference per-bin abundances (not MRN-normalised)
 is_h2_formation_rate = 1 ! h2 formation rates on surfaces from Bron et al. (2014)
 is_absorption_h2 = 1 ! H2 self-shielding from Lee & Herbst (1996) (1=activated)
 is_absorption_co = 2 ! CO self-shielding. (1: Lee & Herbst (1996),  2: Visser et al. (2009))

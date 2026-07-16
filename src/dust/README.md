@@ -1,8 +1,10 @@
-# `src/dust/` — where the dust size distribution will live
+# `src/dust/` — where the dust size distribution lives
 
-Nothing here is implemented yet, and nothing here is compiled. This directory
-fixes the *shape* of the coagulation code so that adding it later does not
-require touching the driver, the solver, or the chemistry.
+As of stage 3 this directory holds its first live, compiled module,
+`dust_grid.f90`: the size grid is now a derived, first-class object (see
+`docs/STAGE3_GRID.md`). The coagulation code — `dustevolution.f90` and the two
+interfaces below — is still to come and still shapes the layout: adding it must
+not require touching the driver, the solver, or the chemistry.
 
 ## The state vector
 
@@ -27,13 +29,29 @@ makes fragmentation a drop-in later rather than a rewrite.
 ## Ice transfer is derived, never specified
 
 When two grains coagulate, their ices go with them. The ice-transfer weights are
+**derived from the redistribution operator** — they are never given their own
+independent prescription. That decision is what keeps dust mass and ice mass
+conserved together: if the ice weights could disagree with `C_ijk`, the two
+budgets would silently drift apart and the diagnostics would not tell you which
+one was wrong.
 
-    f_ijk = C_ijk * m_k / (m_i + m_j)
+The default weighting is `C_ijk` itself: ice follows particle mass. Since
+`sum_k C_ijk = 1` by construction, `C_ijk` already conserves ice — there is no
+extra `m_k/(m_i+m_j)` factor to apply. Two alternative weightings are selectable
+behind the same interface:
 
-They are **derived from the redistribution operator**. They must never be given
-their own independent prescription: if `C_ijk` and `f_ijk` can disagree, dust
-mass and ice mass will silently stop being conserved together, and the
-diagnostics will not tell you which one is wrong.
+* **mass-weighted** — ice split in proportion to the mass each product bin
+  receives (this *is* `C_ijk` when redistribution is mass-conserving);
+* **area-weighted** — ice split in proportion to product surface area, which is
+  the natural choice when the ice is re-condensing onto fresh surface rather
+  than riding along with the mass (Houge & Krijt 2023 chose area-weighting for
+  re-condensation for exactly this reason — worth a code comment when we get
+  there).
+
+All three conserve total ice. They differ only in *where* the ice lands across
+the product bins, so the spread between them is a grid-resolution diagnostic: if
+mass-weighted and area-weighted disagree noticeably, the grid is too coarse to
+resolve the ice transfer, not a sign that one of them is wrong.
 
 ## Diagnostics that must exist before the first coagulation term
 

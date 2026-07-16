@@ -23,7 +23,8 @@
 !  INPUT FILES
 !    parameters.in           : parameters and flags of the model
 !    abundances.in           : initial abundances (gas + ice)
-!    0D_grain_sizes.in       : grain bins (radius, 1/abundance, Td, T_CR,peak)
+!    dust_grid_table.in      : tabulated grain bins (radius, 1/abundance, Td, T_CR,peak);
+!                              only when dust_grid_source/dust_ic = tabulated
 !                              -> disappears at stage 3, replaced by a derived
 !                                 grid + a separate dust IC file
 !    element.in              : name and mass [AMU] of the elements

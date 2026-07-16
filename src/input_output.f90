@@ -328,6 +328,22 @@ use global_variables
   write(10,'(a,es10.3e2,a)') 'uv_flux = ', UV_FLUX, ' ! Scale factor for the UV flux, in unit of the reference flux (1.=nominal)'
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
+  write(10,'(a)') "!*   Dust grid (derived)     *"
+  write(10,'(a)') "!*****************************"
+  write(10,'(a)') "! Grid geometry: mass grid, geometric in mass, from a_min..a_max at mass_ratio."
+  write(10,'(a,a,a)') 'dust_grid_source = ', trim(dust_grid_source), ' ! derived or tabulated (dust_grid_table.in)'
+  write(10,'(a,es10.3e2,a)') 'a_min = ', a_min, ' ! [cm] smallest representative grain radius'
+  write(10,'(a,es10.3e2,a)') 'a_max = ', a_max, ' ! [cm] largest representative grain radius'
+  write(10,'(a,es10.3e2,a)') 'mass_ratio = ', mass_ratio, ' ! per-bin mass ratio (<= 2; nb_bins derived from it)'
+  write(10,'(a)') ""
+  write(10,'(a)') "!*****************************"
+  write(10,'(a)') "!*   Dust IC (populates grid)*"
+  write(10,'(a)') "!*****************************"
+  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN or tabulated'
+  write(10,'(a,es10.3e2,a)') 'dust_power_law_index = ', dust_power_law_index, &
+    ' ! MRN exponent dn/da ~ a^index (-3.5 = MRN), normalised by initial_dtg_mass_ratio'
+  write(10,'(a)') ""
+  write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*      Grain parameters     *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
@@ -336,8 +352,10 @@ use global_variables
   write(10,'(a,es10.3e2,a)') 'sticking_coeff_positive = ', sticking_coeff_positive, ' ! sticking coeff for positive species'
   write(10,'(a,es10.3e2,a)') 'sticking_coeff_negative = ', sticking_coeff_negative, ' ! sticking coeff for negative species'
   write(10,'(a,es10.3e2,a)') 'grain_density = ', GRAIN_DENSITY, ' ! mass density of grain material'
-  write(10,'(a,es10.3e2,a)') 'grain_radius = ', grain_radius, ' ! reference grain radius [cm] &
-  &(single effective grain for is_grain_reactions=0; reference radius for Td(a))'
+  write(10,'(a,es10.3e2,a)') 'reference_grain_radius = ', reference_grain_radius, ' ! reference grain radius [cm] &
+  &(single effective grain for is_grain_reactions=0; a_ref for Td(a))'
+  write(10,'(a,es10.3e2,a)') 'reference_dust_temperature = ', reference_dust_temperature, &
+    ' ! [K] Td at reference_grain_radius, T_ref for the size-scaled Td(a) prescription'
   write(10,'(a,es10.3e2,a)') 'diffusion_barrier_thickness = ', DIFFUSION_BARRIER_THICKNESS, ' ! Barrier thickness [cm]'
   write(10,'(a,es10.3e2,a)') 'surface_site_density = ', SURFACE_SITE_DENSITY, ' ! site density on one grain [cm-2]'
   write(10,'(a,es10.3e2,a)') 'diff_binding_ratio_surf = ', DIFF_BINDING_RATIO_SURF, &
@@ -382,24 +400,31 @@ end subroutine write_parameters
 !
 ! DESCRIPTION: 
 !> @brief reads grain_radii
-!! from datafile 0D_grain_sizes.in
+!! from dust_grid_table.in (tabulated path) or derived in dust_grid.f90
 !
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
 subroutine get_grain_radii()
 !------------------------------------------------------------------------------
-! Allocate every per-bin array and load the size grid.
+! Set up the dust size grid and its initial population.
 !
-! STAGE 3 (inputs restructure) replaces the body of this routine:
-!   * the grid itself will be DERIVED in parameters.in from
-!     (a_min, a_max, mass_ratio) + grain bulk density -- never a list;
-!   * the initial dust distribution moves to its own IC input, parallel to
-!     abundances.in (analytic 'MRN' normalised by initial_dtg_mass_ratio, or
-!     tabulated dust_abundances.in, one n_k per bin, for restarts);
-!   * Td(a) and T_CR,peak(a) become explicit named prescriptions evaluated
-!     once on the grid (see environment.f90).
-! The allocation block below is what survives; 0D_grain_sizes.in disappears.
+! Two independent switches (parameters.in):
+!   dust_grid_source = 'derived'   -> grid from (a_min,a_max,mass_ratio)+density
+!                    = 'tabulated' -> grid radii read from dust_grid_table.in
+!   dust_ic          = 'MRN'       -> analytic power law, normalised by dtg
+!                    = 'tabulated' -> per-bin abundance read from the table
+!
+! The derived + MRN path is the primary (science) path. The tabulated path is
+! kept so the regression against nmgc-2.0 stays bit-identical (its 2-grain
+! reference grid is unphysical for a mass_ratio<=2 derivation) and for restarts
+! / external hand-offs later. dust_grid_table.in is the renamed, byte-for-byte
+! legacy 0D_grain_sizes.in (columns: radius, 1/abundance, Td, T_CR,peak, rank).
+!
+! Per-bin temperatures: on a derived grid, from the Td(a)/T_CR,peak(a)
+! prescriptions (environment.f90); on a tabulated grid, from the table columns.
 !------------------------------------------------------------------------------
 use global_variables
+use dust_grid
+use environment, only : evaluate_dust_temperature_prescriptions
 implicit none
 
 ! Locals
@@ -411,76 +436,90 @@ integer :: comment_position
 integer :: error
 logical :: isDefined
 
-filename = '0D_grain_sizes.in'
-inquire(file=filename, exist=isDefined)
-if (.not.isDefined) then
-  write(Error_unit,*) 'Error: The file ', trim(filename),' does not exist.'
-  call exit(22)
-endif
-call get_linenumber(filename, nb_lines)
-nb_grains = nb_lines
+filename = 'dust_grid_table.in'
 
-allocate(grain_radii(nb_grains))
-grain_radii(1:nb_grains) = 0.d0
-
-allocate(grain_temp(nb_grains))
-grain_temp(1:nb_grains) = 0.d0
-
-allocate(GTODN_0D_temp(nb_grains))
-GTODN_0D_temp(1:nb_grains) = 0.d0
-
-allocate(CR_PEAK_GRAIN_TEMP_all(nb_grains))
-CR_PEAK_GRAIN_TEMP_all(1:nb_grains) = 0.d0
-
-allocate(actual_dust_temp(nb_grains))
-actual_dust_temp(1:nb_grains) = 0.d0
-
-allocate(INDGRAIN(nb_grains))
-INDGRAIN(1:nb_grains) = 0
-
-allocate(INDGRAIN_MINUS(nb_grains))
-INDGRAIN_MINUS(1:nb_grains) = 0
-
-allocate(sumlaysurfsave(nb_grains))
-sumlaysurfsave(1:nb_grains) = 0.d0
-
-allocate(sumlaymantsave(nb_grains))
-sumlaymantsave(1:nb_grains) = 0.d0
-
-allocate(EVAPORATION_RATES_H2(nb_grains))
-EVAPORATION_RATES_H2(1:nb_grains) = 0.d0
-
-allocate(EVAPORATION_RATES_TEMPO_H2(nb_grains))
-EVAPORATION_RATES_TEMPO_H2(1:nb_grains) = 0.d0
-
-allocate(YGRAIN(nb_grains))
-YGRAIN(1:nb_grains) = ""
-
-allocate(YGRAIN_MINUS(nb_grains))
-YGRAIN_MINUS(1:nb_grains) = ""
-
-allocate(GTODN(nb_grains))
-GTODN(1:nb_grains) = 0.d0
-
-allocate(nb_sites_per_grain(nb_grains))
-nb_sites_per_grain(1:nb_grains) = 0.d0
-
-! One size bin per line: radius, 1/abundance, Td and T_CR,peak.
-open(10, file=filename, status='old')
-i = 1
-do
-  read(10, '(a)', iostat=error) line
-  if (error /= 0) exit
-  comment_position = index(line, comment_character)
-  if (comment_position.ne.0) then
-    line = line(1:comment_position - 1)
-  end if
-  if (line.ne.'') then
-    read(line,*) grain_radii(i), GTODN_0D_temp(i), grain_temp(i), CR_PEAK_GRAIN_TEMP_all(i)
-    i = i + 1
+! --- Determine nb_grains BEFORE allocation -------------------------------
+if (dust_grid_source.eq.'derived') then
+  call dust_grid_count_bins()          ! sets nb_grains from mass_ratio
+else if (dust_grid_source.eq.'tabulated') then
+  inquire(file=filename, exist=isDefined)
+  if (.not.isDefined) then
+    write(Error_unit,*) 'Error: The file ', trim(filename),' does not exist.'
+    write(Error_unit,*) '(dust_grid_source = tabulated requires it.)'
+    call exit(22)
   endif
-enddo
-close(10)
+  call get_linenumber(filename, nb_lines)
+  nb_grains = nb_lines
+else
+  write(Error_unit,*) 'Error: dust_grid_source = "', trim(dust_grid_source), &
+                      '" unknown. Use derived or tabulated.'
+  call exit(31)
+endif
+
+! --- Allocate every per-bin array ----------------------------------------
+allocate(grain_radii(nb_grains));            grain_radii(1:nb_grains) = 0.d0
+allocate(mass_grid(nb_grains));              mass_grid(1:nb_grains) = 0.d0
+allocate(grain_temp(nb_grains));             grain_temp(1:nb_grains) = 0.d0
+allocate(GTODN_0D_temp(nb_grains));          GTODN_0D_temp(1:nb_grains) = 0.d0
+allocate(CR_PEAK_GRAIN_TEMP_all(nb_grains)); CR_PEAK_GRAIN_TEMP_all(1:nb_grains) = 0.d0
+allocate(actual_dust_temp(nb_grains));       actual_dust_temp(1:nb_grains) = 0.d0
+allocate(INDGRAIN(nb_grains));               INDGRAIN(1:nb_grains) = 0
+allocate(INDGRAIN_MINUS(nb_grains));         INDGRAIN_MINUS(1:nb_grains) = 0
+allocate(sumlaysurfsave(nb_grains));         sumlaysurfsave(1:nb_grains) = 0.d0
+allocate(sumlaymantsave(nb_grains));         sumlaymantsave(1:nb_grains) = 0.d0
+allocate(EVAPORATION_RATES_H2(nb_grains));   EVAPORATION_RATES_H2(1:nb_grains) = 0.d0
+allocate(EVAPORATION_RATES_TEMPO_H2(nb_grains)); EVAPORATION_RATES_TEMPO_H2(1:nb_grains) = 0.d0
+allocate(YGRAIN(nb_grains));                 YGRAIN(1:nb_grains) = ""
+allocate(YGRAIN_MINUS(nb_grains));           YGRAIN_MINUS(1:nb_grains) = ""
+allocate(GTODN(nb_grains));                  GTODN(1:nb_grains) = 0.d0
+allocate(nb_sites_per_grain(nb_grains));     nb_sites_per_grain(1:nb_grains) = 0.d0
+
+! --- Fill the grid geometry (radii + masses) -----------------------------
+if (dust_grid_source.eq.'derived') then
+  call dust_grid_build_derived()       ! fills mass_grid, grain_radii
+else
+  ! Tabulated: read radius, 1/abundance, Td, T_CR,peak from the table.
+  open(10, file=filename, status='old')
+  i = 1
+  do
+    read(10, '(a)', iostat=error) line
+    if (error /= 0) exit
+    comment_position = index(line, comment_character)
+    if (comment_position.ne.0) line = line(1:comment_position - 1)
+    if (line.ne.'') then
+      read(line,*) grain_radii(i), GTODN_0D_temp(i), grain_temp(i), CR_PEAK_GRAIN_TEMP_all(i)
+      i = i + 1
+    endif
+  enddo
+  close(10)
+  call dust_grid_masses_from_radii()   ! fills mass_grid from the read radii
+endif
+
+! --- Per-bin temperatures ------------------------------------------------
+! Derived grid: evaluate the named prescriptions once here. Tabulated grid:
+! keep the temperatures just read from the table.
+if (dust_grid_source.eq.'derived') then
+  call evaluate_dust_temperature_prescriptions()
+endif
+
+! --- Initial distribution (populates the grid, does not define it) -------
+if (dust_ic.eq.'MRN') then
+  call dust_ic_mrn()                   ! fills GTODN_0D_temp = 1/n_k
+else if (dust_ic.eq.'tabulated') then
+  if (dust_grid_source.ne.'tabulated') then
+    write(Error_unit,*) 'Error: dust_ic = tabulated currently requires &
+                        &dust_grid_source = tabulated (abundances read from the same table).'
+    call exit(31)
+  endif
+  ! GTODN_0D_temp already holds the tabulated 1/abundance column.
+else
+  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN or tabulated.'
+  call exit(31)
+endif
+
+! Export the active grid (dust_grid_table.in format) for diagnostics, restart,
+! and the derived<->tabulated round-trip check.
+call dust_grid_export()
 
 return
 end subroutine get_grain_radii
@@ -740,8 +779,22 @@ if (isDefined) then
       case('grain_density', 'RHOD') ! The old name is kept for compatibility reasons
         read(value, '(e12.6)') GRAIN_DENSITY
       
-      case('grain_radius', 'RD') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') GRAIN_RADIUS
+      case('reference_grain_radius', 'grain_radius', 'RD') ! legacy names kept for compatibility
+        read(value, '(e12.6)') reference_grain_radius
+      case('reference_dust_temperature')
+        read(value, '(e12.6)') reference_dust_temperature
+      case('a_min')
+        read(value, '(e12.6)') a_min
+      case('a_max')
+        read(value, '(e12.6)') a_max
+      case('mass_ratio')
+        read(value, '(e12.6)') mass_ratio
+      case('dust_power_law_index')
+        read(value, '(e12.6)') dust_power_law_index
+      case('dust_grid_source')
+        read(value, *) dust_grid_source
+      case('dust_ic')
+        read(value, *) dust_ic
         
       case('diffusion_barrier_thickness', 'ACM') ! The old name is kept for compatibility reasons
         read(value, '(e12.6)') DIFFUSION_BARRIER_THICKNESS
@@ -1573,29 +1626,10 @@ end subroutine get_grain_mass
 !!!!!! The grain constant C is 10^(−25.13) for carbon and 10^(−25.11) cm^2.5 for silicates.
 !
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
-subroutine get_MRN_distribution()
-use global_variables
-implicit none
+! NOTE: the analytic MRN IC now lives in dust_grid.f90 (dust_ic_mrn), correctly
+! normalised by initial_dtg_mass_ratio. The old get_MRN_distribution (hard-coded
+! const_C, not dtg-normalised) was removed in stage 3.
 
-real(double_precision), parameter :: r_min= 5.d-7 , r_max=1.d-4  ! in cm ....minimum and maximum values of radii in MRN model  !5.d-7 3.11914d-6 arbitrary value
-real(double_precision), parameter :: const_C=-25.11d0 !The grain constant C is 10^(−25.13) for carbon and 10^(−25.11) cm^2.5 for silicates
-integer          :: i
-real(double_precision)           :: a0,a1
-   do i=1,nb_grains
-    if (i==1) then
-      a0=r_min
-    else  
-      a0=(grain_radii(i) + grain_radii(i-1))/2.0
-    endif
-    if (i==nb_grains) then
-      a1=r_max
-    else
-      a1=(grain_radii(i) + grain_radii(i+1))/2.0
-    endif
-        GTODN(i)= ((a0**(-2.5)-a1**(-2.5)) * 10**const_C)/2.5d0
-        GTODN(i)= 1.d0/GTODN(i)
-   enddo
-end subroutine get_MRN_distribution
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @author 

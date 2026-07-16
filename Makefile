@@ -40,6 +40,7 @@ MODULES := \
   $(SRCDIR)/global_variables.f90 \
   $(SRCDIR)/shielding.f90 \
   $(SRCDIR)/environment.f90 \
+  $(SRCDIR)/dust/dust_grid.f90 \
   $(SRCDIR)/input_output.f90 \
   $(SRCDIR)/ode_solver.f90 \
   $(SRCDIR)/gasgrain.f90 \
@@ -63,10 +64,13 @@ $(EXE): $(MODOBJ) $(MAINOBJ) $(ODEOBJ) | $(BINDIR)
 
 # Modules are compiled strictly in the order given by MODULES: each one is
 # forced to wait for the previous ones through the .mod files in $(BUILD).
+# $(dir $@) lets objects live in nested build/ subdirs (e.g. build/dust/).
 $(BUILD)/%.o: $(SRCDIR)/%.f90 | $(BUILD)
+	@mkdir -p $(dir $@)
 	$(FC) -c $(FFLAGS) $< -o $@
 
 $(BUILD)/%.o: $(ODEDIR)/%.f90 | $(BUILD)
+	@mkdir -p $(dir $@)
 	$(FC) -c $(ODEFLAGS) $< -o $@
 
 $(BUILD) $(BINDIR):
@@ -77,7 +81,8 @@ $(BUILD)/utilities.o:        $(BUILD)/iso_fortran_env.o $(BUILD)/numerical_types
 $(BUILD)/global_variables.o: $(BUILD)/utilities.o
 $(BUILD)/shielding.o:        $(BUILD)/numerical_types.o
 $(BUILD)/environment.o:      $(BUILD)/global_variables.o
-$(BUILD)/input_output.o:     $(BUILD)/global_variables.o
+$(BUILD)/dust/dust_grid.o:   $(BUILD)/global_variables.o
+$(BUILD)/input_output.o:     $(BUILD)/global_variables.o $(BUILD)/dust/dust_grid.o $(BUILD)/environment.o
 $(BUILD)/ode_solver.o:       $(BUILD)/global_variables.o $(BUILD)/shielding.o
 $(BUILD)/gasgrain.o:         $(BUILD)/input_output.o $(BUILD)/ode_solver.o $(BUILD)/environment.o
 $(BUILD)/outputs.o:          $(BUILD)/gasgrain.o
