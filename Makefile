@@ -1,5 +1,5 @@
 #==============================================================================
-# 0D multi-grain gas-grain code -- skeleton extracted from NMGC-2.0
+# NEMO dynamical gas-grain code -- skeleton extracted from NMGC-2.0
 #
 # Build:   make            (default, -O2)
 #          make OPT=-O0    (reference-equivalence runs, matches nmgc-2.0's -O0)
