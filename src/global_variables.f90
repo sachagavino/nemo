@@ -17,7 +17,6 @@ implicit none
 !Integer parameter to define number of grains to be used in simulation.
 ! integer, parameter     :: nb_grains=1
 integer                  :: nb_grains
-integer                  :: multi_grain
 real(double_precision),allocatable, dimension(:):: grain_radii,grain_temp
 integer                  :: stdo, ffli
 ! real(double_precision), dimension(1:):: grain_radii
@@ -235,7 +234,6 @@ real(double_precision) :: sticking_coeff_negative !< sticking coefficient for ne
 real(double_precision) :: MINIMUM_INITIAL_ABUNDANCE !< minimum value of the abundance (relative to H) [number ratio]
 real(double_precision) :: initial_gas_density !< [part/cm^3] initial gas density of the structure
 real(double_precision) :: initial_gas_temperature !< initial gas temperature [K], simulation parameter
-real(double_precision) :: initial_dust_temperature !< initial dust temperature [K], simulation parameter
 real(double_precision) :: INITIAL_VISUAL_EXTINCTION !< initial visual extinction [mag] 
 real(double_precision) :: CR_IONISATION_RATE !< cosmic ray ionisation rate [s-1]
 real(double_precision) :: UV_FLUX !< Scale factor for the UV flux, in unit of the reference flux (1.=nominal)

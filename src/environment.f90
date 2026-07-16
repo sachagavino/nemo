@@ -79,34 +79,6 @@ subroutine get_grain_temperature_gas(time, gas_temperature, av, grain_temperatur
 end subroutine get_grain_temperature_gas
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-!> @brief Grain temperature fixed to initial_dust_temperature, identical for
-!! every size bin. Only meaningful in single-grain mode.
-!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-subroutine get_grain_temperature_fixed(time, gas_temperature, av, grain_temperature)
-
-  implicit none
-
-  ! Inputs
-  real(double_precision), intent(in) :: time !<[in] current time of the simulation [s]
-  real(double_precision), intent(in) :: gas_temperature !<[in] gas temperature [K]
-  real(double_precision), intent(in) :: av !<[in] visual extinction [mag]
-
-  ! Outputs
-  real(double_precision), dimension(:), intent(out) :: grain_temperature !<[out] dim(nb_grains) [K]
-  !----------------------------------------------------------------------------
-
-  if (multi_grain.eq.1) then
-    write(error_unit,*) 'Please check parameters.in:'
-    write(error_unit,*) 'if multi_grain = 1, grain_temperature_type = fixed is not valid.'
-    call exit(1)
-  else
-    grain_temperature(1:nb_grains) = initial_dust_temperature
-  endif
-
-  return
-end subroutine get_grain_temperature_fixed
-
-!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @brief Grain temperature set per size bin.
 !!
 !! In this extraction stage the per-bin values are still whatever was loaded
@@ -133,12 +105,6 @@ subroutine get_grain_temperature_fixed_to_dust_size(time, gas_temperature, av, g
   ! Locals
   integer :: i
   !----------------------------------------------------------------------------
-
-  if (multi_grain.eq.0) then
-    write(error_unit,*) 'Please check parameters.in:'
-    write(error_unit,*) 'if multi_grain = 0, grain_temperature_type = fixed_to_dust_size is not valid.'
-    call exit(1)
-  endif
 
   do i=1,nb_grains
     grain_temperature(i) = grain_temp(i)

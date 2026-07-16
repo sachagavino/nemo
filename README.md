@@ -49,6 +49,8 @@ docs/EXTRACTION.md       what was kept, dropped, and changed, and why
 1. **strip to a 0D skeleton, no new physics** — done
 2. **prove equivalence against reference nmgc-2.0** on a 0D 2-grain run — done,
    0 relative difference across 56,560 values
+2b. **retire the single-grain path** (`multi_grain` gone; multi-grain is the only
+   mode) — done, equivalence re-verified
 3. restructure the inputs: size grid *derived* from `(a_min, a_max, mass_ratio)`
    + bulk density (never a list); dust initial condition in its own file,
    parallel to `abundances.in`; `Td(a)` and `T_CR,peak(a)` as explicit switchable

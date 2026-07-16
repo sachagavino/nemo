@@ -63,9 +63,6 @@ get_structure_properties => get_structure_properties_fixed
 !! HOOK (stage 3): these become explicit Td(a) prescriptions evaluated once on
 !! the size grid, together with T_CR,peak(a).
 select case(GRAIN_TEMPERATURE_TYPE)
-  case('fixed') ! Tgrain = initial_dust_temperature, single-grain only
-    get_grain_temperature => get_grain_temperature_fixed
-
   case('fixed_to_dust_size') ! one temperature per size bin
     get_grain_temperature => get_grain_temperature_fixed_to_dust_size
 
@@ -74,7 +71,7 @@ select case(GRAIN_TEMPERATURE_TYPE)
 
   case default
     write(error_unit,*) 'The GRAIN_TEMPERATURE_TYPE="', trim(GRAIN_TEMPERATURE_TYPE),'" cannot be found.'
-    write(error_unit,*) 'Values possible : fixed, fixed_to_dust_size, gas'
+    write(error_unit,*) 'Values possible : fixed_to_dust_size, gas'
     write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
     call exit(10)
 end select
@@ -136,19 +133,17 @@ enddo
 !! (dust_abundances.in, one n_k per bin, for restarts).
 GTODN = 0.d0
 
+! GTODN_FIXED: gas-to-dust number ratio of a single effective grain of the
+! reference radius. Used only on the is_grain_reactions=0 H2-formation fallback,
+! where the size distribution is not resolved. grain_radius survives as that
+! reference radius (and, at stage 3, as the reference radius of the Td(a) map).
 GTODN_FIXED = (4.d0 * PI * GRAIN_DENSITY * grain_radius * grain_radius * grain_radius) / (3.d0*initial_dtg_mass_ratio*AMU)
 
-if (multi_grain.eq.0) then
-  GTODN(1) = (4.d0*PI*GRAIN_DENSITY*grain_radii(1)*grain_radii(1)*grain_radii(1)) / (3.d0*initial_dtg_mass_ratio*AMU)
-  abundances(INDGRAIN(1))       = 1.0d0 / GTODN(1)
-  abundances(INDGRAIN_MINUS(1)) = 0.d0
-else
-  GTODN(:) = GTODN_0D_temp(:)
-  do i=1,nb_grains
-    abundances(INDGRAIN(i))       = 1.0d0 / GTODN_0D_temp(i)
-    abundances(INDGRAIN_MINUS(i)) = 0.d0
-  enddo
-endif
+GTODN(:) = GTODN_0D_temp(:)
+do i=1,nb_grains
+  abundances(INDGRAIN(i))       = 1.0d0 / GTODN_0D_temp(i)
+  abundances(INDGRAIN_MINUS(i)) = 0.d0
+enddo
 
 !Compute the initial abundance of electrons
 ! this is particularly needed for 1D simulations since the subroutine check_conservation is not done in 1D
@@ -200,45 +195,18 @@ call count_nonzeros()
 call preliminary_tests()
 
 
-if (multi_grain.eq.1) then
-  WRITE(stdo,*) ""
-  WRITE(stdo,*) "================================================================"
-  WRITE(stdo,*) "===                THIS IS MULTI-GRAIN MODE                  ==="
-  WRITE(stdo,*) "================================================================"
-  call flush(stdo)
-endif
-
-if (multi_grain.eq.0) then
-  WRITE(stdo,*) ""
-  WRITE(stdo,*) "================================================================"
-  WRITE(stdo,*) "===                THIS IS SINGLE-GRAIN MODE                 ==="
-  WRITE(stdo,*) "================================================================"
-  call flush(stdo)
-endif
-
-
 ! BANNER
-if (multi_grain.eq.1) then
-  WRITE(stdo,*) "STRUCTURE:          0D                                          "
-  WRITE(stdo,*) "GRAIN MODE:         multi-grain                                 "
-  WRITE(*,'(a,I3)') "NB OF GRAINS:     ", nb_grains
-  WRITE(stdo,*) ""
-else
-  WRITE(*,'(a)')"    STRUCTURE:          0D  "
-  WRITE(*,'(a)')"    GRAIN MODE:         single-grain  "
-  WRITE(*,'(a)')"    GRAIN PARAMETERS:   parameters.in"
-  WRITE(stdo,*) ""
-endif
+WRITE(stdo,*) "STRUCTURE:          0D                                          "
+WRITE(*,'(a,I3)') "NB OF GRAINS:     ", nb_grains
+WRITE(stdo,*) ""
 
-if (multi_grain.eq.1) then
-  WRITE(*,'(a)')'----------------------------------------------------------------------------------------------'
-  WRITE(*,'(A)')'    GRAIN_INDEX     GRAIN_RADIUS         No_OF_SITES          GTODN            GRAIN_ABUNDANCE'
-  do i=1,nb_grains
-    write(*,'(I7,10x,4(es12.3,9x))')INDGRAIN(i),grain_radii(i),nb_sites_per_grain(i),GTODN(i),abundances(INDGRAIN(i))
-  enddo
-  WRITE(*,'(a)')'----------------------------------------------------------------------------------------------'
-  call flush(stdo)
-endif
+WRITE(*,'(a)')'----------------------------------------------------------------------------------------------'
+WRITE(*,'(A)')'    GRAIN_INDEX     GRAIN_RADIUS         No_OF_SITES          GTODN            GRAIN_ABUNDANCE'
+do i=1,nb_grains
+  write(*,'(I7,10x,4(es12.3,9x))')INDGRAIN(i),grain_radii(i),nb_sites_per_grain(i),GTODN(i),abundances(INDGRAIN(i))
+enddo
+WRITE(*,'(a)')'----------------------------------------------------------------------------------------------'
+call flush(stdo)
 
 WRITE(*,'(a)')""
 WRITE(*,'(a)')'----> Initialization is done. Integration starts now...'

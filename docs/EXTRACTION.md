@@ -99,3 +99,38 @@ being clobbered. Verified against the reference: results are bit-identical.
    reference case
 
 Coagulation only after all four are green.
+
+## Post-extraction: single-grain retired
+
+The single-grain path was removed. A code whose purpose is to evolve a dust size
+distribution has no single-size mode to fall back on, so `multi_grain` is no
+longer a choice.
+
+Removed:
+* the `multi_grain` flag (declaration, read, write, and every branch on it)
+* `get_grain_temperature_fixed` and the `grain_temperature_type = fixed` mode
+* `initial_dust_temperature` (its only consumer was the `fixed` mode)
+* the single-grain branches in `get_grain_radii` (nb_grains is always the line
+  count of the grain file) and in the GTODN / abundance / banner blocks
+
+Deliberately kept — these were *not* single-grain-specific, despite living near it:
+* **`initial_dtg_mass_ratio`** scales `AV_NH_ratio` on every path (removing it
+  breaks the equivalence run) and is the normalisation of the MRN dust IC at
+  stage 3.
+* **`grain_radius`** feeds `GTODN_FIXED`, the single effective grain used on the
+  `is_grain_reactions = 0` H2-formation fallback (reachable with a resolved size
+  distribution too), and is the reference radius for the future Td(a) map. It
+  should be renamed `reference_grain_radius` at stage 3.
+
+`parameters.in` was also rewritten: it had never been cleaned after stage 1 and
+still carried the raw reference keys. Dropped now: `structure_type`,
+`spatial_resolution`, `is_structure_evolution`, `photo_disk`,
+`is_h2_adhoc_form`, `height_h2formation`, `multi_grain`,
+`initial_dust_temperature`. `is_3_phase` default is set to 0 to match the v1
+2-phase target and the verified equivalence run.
+
+Re-verified: the 0D 2-grain case is still bit-identical to the reference
+nmgc-2.0 (56560 values, worst relative difference 0). The `multi_grain = 1` line
+survives in `tests/reference_0D_2grains/parameters.in` only because the
+reference binary that `equivalence.sh` runs alongside still needs it; the
+skeleton ignores it.

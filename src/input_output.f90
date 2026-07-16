@@ -289,8 +289,7 @@ use global_variables
   write(10,'(a)') ""
   write(10,'(a,i0,a)') 'preliminary_test = ', IS_TEST, ' ! Will or will not do comprehensive tests &
   &before the simulation. Switch it off when lauching thousands or simulations'
-  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed, fixed_to_dust_size, gas'
-  write(10,'(a)') '! fixed: Tgrain = initial_dust_temperature. All dust grains have the same temperature;'
+  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed_to_dust_size, gas'
   write(10,'(a)') '! fixed_to_dust_size: Td = Td(a), one temperature per size bin;'
   write(10,'(a)') '! gas: Tgrain = Tgas ;'
   write(10,'(a,i0,a)') 'is_grain_reactions = ', IS_GRAIN_REACTIONS, ' ! Accretion, grain surface reactions'
@@ -317,13 +316,6 @@ use global_variables
   write(10,'(a)') ""
   write(10,'(a,es10.3e2,a)') 'nb_active_lay = ',nb_active_lay, ' ! Number of active layers'
   write(10,'(a)') ""
-  write(10,'(a)') '!******************************************************'
-  write(10,'(a)') '!*        Use single-grain or multi-grain mode        *'
-  write(10,'(a)') '!******************************************************'
-  write(10,'(a)') ""
-  write(10,'(a,i0,a)') 'multi_grain = ', multi_grain, ' ! 1 = multi-grain; 0 = single-grain. &
-                                               & If 1, the grain parameters are read in 0D_grain_sizes.in.'
-  write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*    Gas phase parameters   *"
   write(10,'(a)') "!*****************************"
@@ -339,14 +331,13 @@ use global_variables
   write(10,'(a)') "!*      Grain parameters     *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
-  write(10,'(a,es10.3e2,a)') 'initial_dust_temperature = ', initial_dust_temperature, ' ! initial dust temperature [K]&
-                              & when grain_temperature_type=fixed'
   write(10,'(a,es10.3e2,a)') 'initial_dtg_mass_ratio = ', initial_dtg_mass_ratio, ' ! dust-to-gas ratio by mass'
   write(10,'(a,es10.3e2,a)') 'sticking_coeff_neutral = ', sticking_coeff_neutral, ' ! sticking coeff for neutral species'
   write(10,'(a,es10.3e2,a)') 'sticking_coeff_positive = ', sticking_coeff_positive, ' ! sticking coeff for positive species'
   write(10,'(a,es10.3e2,a)') 'sticking_coeff_negative = ', sticking_coeff_negative, ' ! sticking coeff for negative species'
   write(10,'(a,es10.3e2,a)') 'grain_density = ', GRAIN_DENSITY, ' ! mass density of grain material'
-  write(10,'(a,es10.3e2,a)') 'grain_radius = ', grain_radius, ' ! grain radius [cm]'
+  write(10,'(a,es10.3e2,a)') 'grain_radius = ', grain_radius, ' ! reference grain radius [cm] &
+  &(single effective grain for is_grain_reactions=0; reference radius for Td(a))'
   write(10,'(a,es10.3e2,a)') 'diffusion_barrier_thickness = ', DIFFUSION_BARRIER_THICKNESS, ' ! Barrier thickness [cm]'
   write(10,'(a,es10.3e2,a)') 'surface_site_density = ', SURFACE_SITE_DENSITY, ' ! site density on one grain [cm-2]'
   write(10,'(a,es10.3e2,a)') 'diff_binding_ratio_surf = ', DIFF_BINDING_RATIO_SURF, &
@@ -420,18 +411,14 @@ integer :: comment_position
 integer :: error
 logical :: isDefined
 
-if (multi_grain.eq.0) then
-  nb_grains = 1
-else
-  filename = '0D_grain_sizes.in'
-  inquire(file=filename, exist=isDefined)
-  if (.not.isDefined) then
-    write(Error_unit,*) 'Error: The file ', trim(filename),' does not exist.'
-    call exit(22)
-  endif
-  call get_linenumber(filename, nb_lines)
-  nb_grains = nb_lines
+filename = '0D_grain_sizes.in'
+inquire(file=filename, exist=isDefined)
+if (.not.isDefined) then
+  write(Error_unit,*) 'Error: The file ', trim(filename),' does not exist.'
+  call exit(22)
 endif
+call get_linenumber(filename, nb_lines)
+nb_grains = nb_lines
 
 allocate(grain_radii(nb_grains))
 grain_radii(1:nb_grains) = 0.d0
@@ -478,29 +465,22 @@ GTODN(1:nb_grains) = 0.d0
 allocate(nb_sites_per_grain(nb_grains))
 nb_sites_per_grain(1:nb_grains) = 0.d0
 
-if (multi_grain.eq.0) then
-  ! Single grain: everything comes from the scalar legacy parameters.
-  grain_radii(:)            = grain_radius
-  CR_PEAK_GRAIN_TEMP_all(:) = cr_peak_grain_temp
-  grain_temp(:)             = initial_dust_temperature
-else
-  ! Multi-grain: radius, 1/abundance, Td and T_CR,peak, one line per bin.
-  open(10, file=filename, status='old')
-  i = 1
-  do
-    read(10, '(a)', iostat=error) line
-    if (error /= 0) exit
-    comment_position = index(line, comment_character)
-    if (comment_position.ne.0) then
-      line = line(1:comment_position - 1)
-    end if
-    if (line.ne.'') then
-      read(line,*) grain_radii(i), GTODN_0D_temp(i), grain_temp(i), CR_PEAK_GRAIN_TEMP_all(i)
-      i = i + 1
-    endif
-  enddo
-  close(10)
-endif
+! One size bin per line: radius, 1/abundance, Td and T_CR,peak.
+open(10, file=filename, status='old')
+i = 1
+do
+  read(10, '(a)', iostat=error) line
+  if (error /= 0) exit
+  comment_position = index(line, comment_character)
+  if (comment_position.ne.0) then
+    line = line(1:comment_position - 1)
+  end if
+  if (line.ne.'') then
+    read(line,*) grain_radii(i), GTODN_0D_temp(i), grain_temp(i), CR_PEAK_GRAIN_TEMP_all(i)
+    i = i + 1
+  endif
+enddo
+close(10)
 
 return
 end subroutine get_grain_radii
@@ -685,8 +665,6 @@ if (isDefined) then
       !case('nb_grains')
       !  read(value, '(i4)') nb_grains
 
-      case('multi_grain')
-        read(value, '(i2)') multi_grain
 
       case('is_grain_reactions', 'IDUST') ! The old name is kept for compatibility reasons
         read(value, '(i2)') IS_GRAIN_REACTIONS
@@ -746,8 +724,6 @@ if (isDefined) then
         read(value, '(e12.6)') UV_FLUX
       
       ! Grain
-      case('initial_dust_temperature', 'DTEMP0') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') initial_dust_temperature
       
       case('initial_dtg_mass_ratio', 'DTOGM') ! The old name is kept for compatibility reasons
         read(value, '(e12.6)') initial_dtg_mass_ratio
