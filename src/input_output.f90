@@ -128,6 +128,75 @@ return
 end subroutine write_current_output
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Write the dust size distribution as raw state at the current output.
+!!
+!! One ASCII file, dust_distribution.out, one row per (time, bin), appended at
+!! every output time (created at index=1). This is the dust-mass and grain-number
+!! CONSERVATION diagnostic that src/dust/README.md requires before the first
+!! coagulation term: with a static distribution sum_k m_k n_k must be constant.
+!!
+!! What is written is RAW STATE, deliberately not the mass-weighted sigma(a):
+!!   n_k    = total grain NUMBER density of bin k per H, summed over charge
+!!            states (GRAIN0_k + GRAIN0_k-). Grains only move between charge
+!!            states, they are not created/destroyed, so this total -- not the
+!!            neutral abundance alone -- is the conserved per-bin number.
+!!   m_k    = mass_grid(k) [g], the representative grain mass of the bin.
+!! The reduction to sigma(a) = m*dn/dlog a and the n(a,t) view is a python script
+!! in scripts/ (project convention: reductions live in python, not in the core).
+!!
+!! Columns: time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H], then three
+!! per-time running totals repeated on each row for easy loading:
+!!   dust_mass[g/H] = sum_k m_k n_k, grain_number[/H] = sum_k n_k, dust_mass_sink.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine write_current_dust(index)
+
+use global_variables
+
+implicit none
+
+! Input
+integer, intent(in) :: index !<[in] The reference index of the current output
+
+! Locals
+integer :: k
+real(double_precision) :: n_k, dust_mass_per_h, grain_number_per_h
+real(double_precision), dimension(nb_grains) :: nk_all
+
+! total grain number per bin = neutral + negative charge state (per H)
+dust_mass_per_h    = 0.d0
+grain_number_per_h = 0.d0
+do k=1,nb_grains
+  n_k = abundances(INDGRAIN(k))
+  if (INDGRAIN_MINUS(k).gt.0) n_k = n_k + abundances(INDGRAIN_MINUS(k))
+  nk_all(k)          = n_k
+  dust_mass_per_h    = dust_mass_per_h    + mass_grid(k) * n_k
+  grain_number_per_h = grain_number_per_h + n_k
+enddo
+
+if (index == 1) then
+  open(36, file='dust_distribution.out', status='replace')
+  write(36,'(a)') '! Dust size distribution, raw state, one row per (time, bin).'
+  write(36,'(a)') '! n_k is the total grain number per bin (GRAIN0_k + GRAIN0_k-), per H.'
+  write(36,'(a)') '! sigma(a) = m*dn/dlog a is a reduction (scripts/dust_distribution.py), not stored here.'
+  write(36,'(a)') '! time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H]  &
+                  &dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]'
+else
+  open(36, file='dust_distribution.out', status='old', position='append')
+end if
+
+do k=1,nb_grains
+  write(36,'(es20.10e3,2x,i4,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,&
+            &es22.14e3,2x,es22.14e3,2x,es22.14e3)') &
+    current_time/YEAR, k, grain_radii(k), mass_grid(k), nk_all(k), mass_grid(k)*nk_all(k), &
+    dust_mass_per_h, grain_number_per_h, dust_mass_sink
+enddo
+
+close(36)
+
+return
+end subroutine write_current_dust
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @author 
 !> Franck Hersant
 !

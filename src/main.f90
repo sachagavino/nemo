@@ -242,6 +242,7 @@ PROGRAM nmgc
 
       call write_current_rates(index=output_idx)
       call write_current_output(index=output_idx)
+      call write_current_dust(index=output_idx)
 
       first_step_done = .true.
     enddo
