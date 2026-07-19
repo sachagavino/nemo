@@ -69,6 +69,16 @@ The default derived science grid (`a_min = 5 nm`, `a_max = 0.5 um`,
 `mass_ratio = 2`) yields 20 bins, radii stepping by `2^(1/3)`, with MRN mass
 conservation exact to double precision.
 
+This round-trip is now a **permanent, self-contained regression**:
+`tests/roundtrip_derived.sh` runs a derived + MRN grid, feeds its
+`dust_grid_active.out` export back through the tabulated path, and requires
+`abundances.out` to be byte-identical. Unlike `equivalence.sh` it needs no
+external nmgc-2.0 binary, so it runs in CI. It uses a small (4-bin) grid on
+purpose — bin count changes only the species count and runtime, never which code
+paths are exercised — and it is genuinely sensitive: a 14-figure-truncated table
+makes it fail (the same ~1e-13-perturbation drift noted above), which is how we
+know a *pass* means the two paths agree and not that the test is inert.
+
 ## Top-bin sink (a grid property, decided now)
 
 A top-bin self-collision scatters mass above `m_N`, which has no bin on a fixed
