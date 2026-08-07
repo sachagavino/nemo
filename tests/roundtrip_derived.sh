@@ -50,16 +50,28 @@ echo "==> building NEMO (${OPT:--O2})"
 make -C "$HERE" clean >/dev/null
 make -C "$HERE" ${OPT:+OPT=$OPT} >/dev/null
 
+# portable in-place sed: BSD/macOS `sed -i` needs a backup-suffix argument and
+# eats the following -e, so avoid -i entirely and go through a temp file. No
+# arrays either, so this is safe on the bash 3.2 that macOS ships as /bin/bash.
+sedi() { # sedi <file> <expr> [<expr> ...]
+  local f=$1; shift
+  local tmp="$f.sedi$$" e
+  cp "$f" "$tmp"
+  for e in "$@"; do
+    sed "$e" "$tmp" > "$tmp.n" && mv "$tmp.n" "$tmp"
+  done
+  mv "$tmp" "$f"
+}
+
 # helper: rewrite the grid + run-length keys in a parameters.in to the test values
 rewrite() { # file  (edits in place)
   local f=$1
-  sed -i \
-    -e "s|^\(a_min[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_AMIN |" \
-    -e "s|^\(a_max[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_AMAX |" \
-    -e "s|^\(mass_ratio[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_MRATIO |" \
-    -e "s|^\(stop_time[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_STOP |" \
-    -e "s|^\(nb_outputs[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_NOUT |" \
-    "$f"
+  sedi "$f" \
+    "s|^\(a_min[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_AMIN |" \
+    "s|^\(a_max[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_AMAX |" \
+    "s|^\(mass_ratio[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_MRATIO |" \
+    "s|^\(stop_time[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_STOP |" \
+    "s|^\(nb_outputs[[:space:]]*=[[:space:]]*\)[^!]*|\1$RT_NOUT |"
 }
 
 # --- side 1: the DERIVED + MRN grid (the new default path) ------------------
@@ -67,9 +79,9 @@ echo "==> running the derived grid (dust_grid_source=derived, dust_ic=MRN)"
 mkdir -p "$WORK/derived"
 cp "$HERE"/inputs/*.in "$WORK/derived/"
 rewrite "$WORK/derived/parameters.in"
-sed -i -e "s|^\(dust_grid_source[[:space:]]*=[[:space:]]*\)[^!]*|\1derived |" \
-       -e "s|^\(dust_ic[[:space:]]*=[[:space:]]*\)[^!]*|\1MRN |" \
-       "$WORK/derived/parameters.in"
+sedi "$WORK/derived/parameters.in" \
+       "s|^\(dust_grid_source[[:space:]]*=[[:space:]]*\)[^!]*|\1derived |" \
+       "s|^\(dust_ic[[:space:]]*=[[:space:]]*\)[^!]*|\1MRN |"
 ( cd "$WORK/derived" && "$BIN" run > run.log 2>&1 )
 NBINS=$(grep -vc '^!' "$WORK/derived/dust_grid_active.out")
 echo "    derived grid: $NBINS bins exported to dust_grid_active.out"
@@ -79,9 +91,9 @@ echo "==> running the tabulated round-trip (fed the derived export back in)"
 mkdir -p "$WORK/tabulated"
 cp "$HERE"/inputs/*.in "$WORK/tabulated/"
 rewrite "$WORK/tabulated/parameters.in"
-sed -i -e "s|^\(dust_grid_source[[:space:]]*=[[:space:]]*\)[^!]*|\1tabulated |" \
-       -e "s|^\(dust_ic[[:space:]]*=[[:space:]]*\)[^!]*|\1tabulated |" \
-       "$WORK/tabulated/parameters.in"
+sedi "$WORK/tabulated/parameters.in" \
+       "s|^\(dust_grid_source[[:space:]]*=[[:space:]]*\)[^!]*|\1tabulated |" \
+       "s|^\(dust_ic[[:space:]]*=[[:space:]]*\)[^!]*|\1tabulated |"
 # the derived run's active grid IS the tabulated input
 cp "$WORK/derived/dust_grid_active.out" "$WORK/tabulated/dust_grid_table.in"
 ( cd "$WORK/tabulated" && "$BIN" run > run.log 2>&1 )
