@@ -153,6 +153,15 @@ integer, allocatable, dimension(:) :: INDGRAIN_MINUS !< Index corresponding to G
 ! integer, dimension(1:nb_grains) :: INDGRAIN_MINUS !< Index corresponding to GRAIN- in nb_species length arrays
 integer, allocatable, dimension(:) :: GRAIN_RANK ! dim(nb_reactions) it says which size of grain is involved in a particular reaction
 
+! ---- stage-4 Part 1: index maps precomputed once at init (build_index_maps) ----
+! These replace per-RHS-call string comparisons and read(c_i,'(I2)') parses in
+! get_temporal_derivatives / set_dependant_rates. They are pure lookups of what
+! that per-call code recomputed every step, so the RHS stays bit-identical.
+integer, allocatable, dimension(:) :: SPECIES_GRAIN_RANK    ! dim(nb_species): grain rank from species_name(i)(2:3) for J/K species, else 0
+integer, allocatable, dimension(:) :: SPECIES_PHASE         ! dim(nb_species): 1 if species_name(i)(1:1)=='J', 2 if 'K', else 0
+integer, allocatable, dimension(:) :: SPECIES_ICE_CODE      ! dim(nb_species): tracked surface ice, 0 none / 1 CO / 2 H2O / 3 NH3 / 4 CO2 / 5 CH4 / 6 CH3OH (J phase only)
+integer, allocatable, dimension(:) :: REACTION_C4_GRAIN_RANK ! dim(nb_reactions): grain rank from REACTION_COMPOUNDS_NAMES(4,i)(2:3) when J/K-prefixed, else 0
+
 ! 3 phase model
 REAL(double_precision), allocatable, dimension(:) :: sumlaysurfsave !< Total number of layers on the grain surface
 ! REAL(double_precision), dimension(1:nb_grains) :: sumlaysurfsave !< Total number of layers on the grain surface

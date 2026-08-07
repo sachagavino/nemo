@@ -468,13 +468,12 @@ IF(is_3_phase.eq.1) then
 rate_tot_acc = 0.0D+00
 rate_tot_des = 0.0D+00
 DO i = nb_gaseous_species+1,nb_species
-   IF((species_name(i)(1:1).ne.'K').and.(species_name(i)(1:1).ne.'J')) THEN
+   IF(SPECIES_PHASE(i).eq.0) THEN
       PRINT*, "Problem in the computation of rate_tot in get_temporal_derivatives..."
       stop
    ENDIF
-   IF((species_name(i)(1:1).eq.'J')) THEN
-     c_i = species_name(i)(2:3)  
-     read(c_i,'(I2)')ic_i
+   IF(SPECIES_PHASE(i).eq.1) THEN
+     ic_i = SPECIES_GRAIN_RANK(i)
        rate_tot_acc(ic_i) = rate_tot_acc(ic_i) + YDTMP1(i)
        rate_tot_des(ic_i) = rate_tot_des(ic_i) + YDTMP2(i)
    ENDIF
@@ -914,9 +913,8 @@ end subroutine get_temporal_derivatives
   !-------------------------------------------------------------
 
   do K=1,nb_species
-    if(species_name(k)(:1)=='J' .or. species_name(k)(:1)=='K') then
-      c_i = species_name(k)(2:3)  
-      read(c_i,'(I2)')ic_i
+    if(SPECIES_PHASE(k).ne.0) then
+      ic_i = SPECIES_GRAIN_RANK(k)
       
 !       if (grain_radii(ic_i) < 1e-5) then
 !         CR_PEAK_DURATION = 1.0d-5/(nb_sites_per_grain(ic_i)/1.0d6)
@@ -1143,54 +1141,23 @@ abCO(1:nb_grains) = 0.d0
   abCH3OH  = 0.0D+00
   DO J = nb_gaseous_species+1,nb_species
 !        ab_tot = ab_tot + Y(j)
-       IF (species_name(j)(1:1).eq."J") THEN
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
+       ic_i = SPECIES_GRAIN_RANK(j)
+       IF (SPECIES_PHASE(j).eq.1) THEN            ! J: surface
          ab_tot(ic_i)  = ab_tot(ic_i) + Y(j)
          ab_surf(ic_i) = ab_surf(ic_i) + Y(j)
-       ENDIF  
-       IF (species_name(j)(1:1).eq."K") THEN
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
+       ENDIF
+       IF (SPECIES_PHASE(j).eq.2) THEN            ! K: mantle
          ab_tot(ic_i)  = ab_tot(ic_i) + Y(j)
          ab_mant(ic_i) = ab_mant(ic_i) + Y(j)
        ENDIF
-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CO      ') then
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
-         abCO(ic_i)  = Y(J)
-       ENDIF
-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'H2O     ') then
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
-         abH2O(ic_i)  = Y(J)
-       ENDIF
-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'NH3     ') then
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
-         abNH3(ic_i)  = Y(J)
-       ENDIF
-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CO2     ') then
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
-         abCO2(ic_i)  = Y(J)
-       ENDIF
-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CH4     ') then
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
-         abCH4(ic_i)  = Y(J)
-       ENDIF
-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CH3OH   ') then
-         c_i = species_name(j)(2:3)
-         read(c_i,'(I2)')ic_i
-         abCH3OH(ic_i)  = Y(J)
-       ENDIF
-!          IF(species_name(J).EQ.'JCO        ') abCO  = Y(J)
-!          IF(species_name(J).EQ.'JH2O       ') abH2O = Y(J)
-!          IF(species_name(J).EQ.'JNH3       ') abNH3 = Y(J)
-!          IF(species_name(J).EQ.'JCO2       ') abCO2 = Y(J)
-!          IF(species_name(J).EQ.'JCH4       ') abCH4 = Y(J)
-!          IF(species_name(J).EQ.'JCH3OH     ') abCH3OH = Y(J)
+       SELECT CASE (SPECIES_ICE_CODE(j))          ! tracked surface ices (J only)
+         CASE (1) ; abCO(ic_i)    = Y(J)
+         CASE (2) ; abH2O(ic_i)   = Y(J)
+         CASE (3) ; abNH3(ic_i)   = Y(J)
+         CASE (4) ; abCO2(ic_i)   = Y(J)
+         CASE (5) ; abCH4(ic_i)   = Y(J)
+         CASE (6) ; abCH3OH(ic_i) = Y(J)
+       END SELECT
   ENDDO
 
   do i=1,nb_grains
@@ -1473,8 +1440,7 @@ abCO(1:nb_grains) = 0.d0
 
        IF(REACTION_COMPOUNDS_NAMES(1,J) == "C          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "C       " &
          .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
-         c_i = REACTION_COMPOUNDS_NAMES(4,J)(2:3)
-         read(c_i,'(I2)')ic_i
+         ic_i = REACTION_C4_GRAIN_RANK(J)
           IF(ab_surf(ic_i).le. ab_lay(ic_i)) THEN
              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
                (1.0D+00-(abH2O(ic_i)+abCO2(ic_i)+abNH3(ic_i)+abCH3OH(ic_i)+abCH4(ic_i))/ab_lay(ic_i))
@@ -1486,8 +1452,7 @@ abCO(1:nb_grains) = 0.d0
 
        IF(REACTION_COMPOUNDS_NAMES(1,J) == "CH         " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "CH      " &
          .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
-         c_i = REACTION_COMPOUNDS_NAMES(4,J)(2:3)
-         read(c_i,'(I2)')ic_i
+         ic_i = REACTION_C4_GRAIN_RANK(J)
           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
                                                     (1.0D+00-(abH2O(ic_i)+abNH3(ic_i)+abCH3OH(ic_i))/ab_lay(ic_i))
@@ -1499,8 +1464,7 @@ abCO(1:nb_grains) = 0.d0
 
        IF(REACTION_COMPOUNDS_NAMES(1,J) == "O          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "O       " &
          .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
-         c_i = REACTION_COMPOUNDS_NAMES(4,J)(2:3)
-         read(c_i,'(I2)')ic_i
+         ic_i = REACTION_C4_GRAIN_RANK(J)
           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J))*(1.0D+00-abCO(ic_i)/ab_lay(ic_i))
           ELSE
@@ -1889,15 +1853,12 @@ end if
   ab_surf = 0.0d0
   ab_mant = 0.0d0
   DO J = nb_gaseous_species+1,nb_species
-    IF (species_name(j)(1:1).eq."J") THEN 
-      c_i = species_name(j)(2:3)
-      read(c_i,'(I2)')ic_i
+    ic_i = SPECIES_GRAIN_RANK(j)
+    IF (SPECIES_PHASE(j).eq.1) THEN
       ab_surf(ic_i) = ab_surf(ic_i) + Y(j)
     ENDIF
-    
-    IF (species_name(j)(1:1).eq."K") THEN
-      c_i = species_name(j)(2:3)
-      read(c_i,'(I2)')ic_i
+
+    IF (SPECIES_PHASE(j).eq.2) THEN
       ab_mant(ic_i) = ab_mant(ic_i) + Y(j)
     ENDIF  
   ENDDO

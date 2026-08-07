@@ -85,6 +85,10 @@ call read_species()
 ! Read list of reactions for gas and grains
 call read_reactions()
 
+! Precompute the per-species / per-reaction grain-rank, phase and ice-species
+! index maps so the RHS need not re-parse species names on every call.
+call build_index_maps()
+
 ! Read branching ratios for the computation of photorates in the case of disks
 !if (photo_disk.eq.1) then
 !    call read_br()

@@ -1492,6 +1492,60 @@ enddo
 return
 end subroutine read_reactions
 
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Precompute, once at init, the per-species and per-reaction grain-rank /
+!! phase / ice-species index maps that get_temporal_derivatives and
+!! set_dependant_rates used to recover on every RHS call via string comparisons
+!! and read(c_i,'(I2)') parses. Each map stores exactly what that per-call code
+!! computed, so substituting a lookup for the parse leaves the RHS bit-identical.
+!! Must be called after read_species and read_reactions (species_name and
+!! REACTION_COMPOUNDS_NAMES populated).
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine build_index_maps()
+use global_variables
+implicit none
+integer :: i
+
+! per-species maps
+if (.not.allocated(SPECIES_GRAIN_RANK)) allocate(SPECIES_GRAIN_RANK(nb_species))
+if (.not.allocated(SPECIES_PHASE))      allocate(SPECIES_PHASE(nb_species))
+if (.not.allocated(SPECIES_ICE_CODE))   allocate(SPECIES_ICE_CODE(nb_species))
+SPECIES_GRAIN_RANK(:) = 0
+SPECIES_PHASE(:)      = 0
+SPECIES_ICE_CODE(:)   = 0
+
+do i=1,nb_species
+  if (species_name(i)(1:1).eq.'J') then
+    SPECIES_PHASE(i) = 1
+    read(species_name(i)(2:3),'(I2)') SPECIES_GRAIN_RANK(i)
+    ! tracked surface ices, mirroring the (4:11) 8-character comparisons exactly
+    if      (species_name(i)(4:11).eq.'CO      ') then ; SPECIES_ICE_CODE(i) = 1
+    else if (species_name(i)(4:11).eq.'H2O     ') then ; SPECIES_ICE_CODE(i) = 2
+    else if (species_name(i)(4:11).eq.'NH3     ') then ; SPECIES_ICE_CODE(i) = 3
+    else if (species_name(i)(4:11).eq.'CO2     ') then ; SPECIES_ICE_CODE(i) = 4
+    else if (species_name(i)(4:11).eq.'CH4     ') then ; SPECIES_ICE_CODE(i) = 5
+    else if (species_name(i)(4:11).eq.'CH3OH   ') then ; SPECIES_ICE_CODE(i) = 6
+    endif
+  else if (species_name(i)(1:1).eq.'K') then
+    SPECIES_PHASE(i) = 2
+    read(species_name(i)(2:3),'(I2)') SPECIES_GRAIN_RANK(i)
+  endif
+enddo
+
+! per-reaction map: grain rank of the first product (compound slot 4), used by the
+! Eley-Rideal / complex-induced accretion corrections. Parsed only where compound
+! 4 is a J/K species (the only reactions that reach those sites); 0 elsewhere.
+if (.not.allocated(REACTION_C4_GRAIN_RANK)) allocate(REACTION_C4_GRAIN_RANK(nb_reactions))
+REACTION_C4_GRAIN_RANK(:) = 0
+do i=1,nb_reactions
+  if (REACTION_COMPOUNDS_NAMES(4,i)(1:1).eq.'J' .or. REACTION_COMPOUNDS_NAMES(4,i)(1:1).eq.'K') then
+    read(REACTION_COMPOUNDS_NAMES(4,i)(2:3),'(I2)') REACTION_C4_GRAIN_RANK(i)
+  endif
+enddo
+
+return
+end subroutine build_index_maps
+
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @author 
