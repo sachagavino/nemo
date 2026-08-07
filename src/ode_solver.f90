@@ -1438,8 +1438,7 @@ abCO(1:nb_grains) = 0.d0
     ! When Eley-Rideal and complex induced reaction are activated we must be carreful on how accretions rate are computed
     IF(is_er_cir.ne.0) THEN
 
-       IF(REACTION_COMPOUNDS_NAMES(1,J) == "C          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "C       " &
-         .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
+       IF(ER_PATTERN(J).eq.1) THEN
          ic_i = REACTION_C4_GRAIN_RANK(J)
           IF(ab_surf(ic_i).le. ab_lay(ic_i)) THEN
              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
@@ -1450,8 +1449,7 @@ abCO(1:nb_grains) = 0.d0
           ENDIF
        ENDIF
 
-       IF(REACTION_COMPOUNDS_NAMES(1,J) == "CH         " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "CH      " &
-         .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
+       IF(ER_PATTERN(J).eq.2) THEN
          ic_i = REACTION_C4_GRAIN_RANK(J)
           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
@@ -1462,8 +1460,7 @@ abCO(1:nb_grains) = 0.d0
           ENDIF
        ENDIF
 
-       IF(REACTION_COMPOUNDS_NAMES(1,J) == "O          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "O       " &
-         .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
+       IF(ER_PATTERN(J).eq.3) THEN
          ic_i = REACTION_C4_GRAIN_RANK(J)
           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J))*(1.0D+00-abCO(ic_i)/ab_lay(ic_i))
@@ -1561,13 +1558,9 @@ abCO(1:nb_grains) = 0.d0
     DIFFUSION_RATE_1(J)=THERMAL_HOPING_RATE(reactant_1_idx(J))
     DIFFUSION_RATE_2(J)=THERMAL_HOPING_RATE(reactant_2_idx(J))
 
-    ! --------- Check for JH,JH2, and JO
-    if (REACTION_COMPOUNDS_NAMES(1,J)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(1,J)(1:1) == 'J') IMOD1=1
-    if (REACTION_COMPOUNDS_NAMES(1,J)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(1,J)(1:1) == 'J') IMOD1=2
-    if (REACTION_COMPOUNDS_NAMES(1,J)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(1,J)(1:1) == 'J') IMOD1=3
-    if (REACTION_COMPOUNDS_NAMES(2,J)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(2,J)(1:1) == 'J') IMOD2=1
-    if (REACTION_COMPOUNDS_NAMES(2,J)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(2,J)(1:1) == 'J') IMOD2=2
-    if (REACTION_COMPOUNDS_NAMES(2,J)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(2,J)(1:1) == 'J') IMOD2=3
+    ! --------- Check for JH,JH2, and JO (precomputed base classification)
+    IMOD1=IMOD1_BASE(J)
+    IMOD2=IMOD2_BASE(J)
 
     ! --------- QM for JH,JH2 only - others are too heavy
     if (IMOD1+IMOD2.NE.0) then
@@ -1643,7 +1636,7 @@ abCO(1:nb_grains) = 0.d0
                        EXP(-ACTIV)
            prob_deso = EVAPORATION_RATES_TEMPO(reactant_1_idx(J)) + &
                        EVAPORATION_RATES_TEMPO(reactant_2_idx(J))
-           IF(ANY(REACTION_COMPOUNDS_NAMES(:,j)(1:1).eq.'K')) prob_deso = 0.0D+00
+           IF(HAS_MANTLE_COMPOUND(J)) prob_deso = 0.0D+00
            prob_diff = (DIFFUSION_RATE_1(J) + DIFFUSION_RATE_2(J)) * nb_sites_per_grain(GRAIN_RANK(J))
 
            barr = prob_reac+prob_deso+prob_diff
@@ -1653,50 +1646,13 @@ abCO(1:nb_grains) = 0.d0
     endif
 
     ! Modified rate have sense only for surface species
-    IF(any(REACTION_COMPOUNDS_NAMES(:,j)(1:1).eq."J")) THEN
+    IF(HAS_SURFACE_COMPOUND(J)) THEN
 
-    ! --------- Modify according to MODIFY_RATE_FLAG switch:
+    ! --------- Modify according to MODIFY_RATE_FLAG switch (precomputed final
+    !           classification; MODIFY_RATE_FLAG is a run constant):
     if (MODIFY_RATE_FLAG.NE.0) then
-      ! ------------ if H+H->H2 is only modified rxn:
-      if ((MODIFY_RATE_FLAG.EQ.-1).AND.(IMOD1.NE.1.OR.IMOD2.NE.1)) then
-        IMOD1=0
-        IMOD2=0
-      endif
-
-      ! ------------ if only H is modified:
-      if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD1.NE.1)) IMOD1=0
-      if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD2.NE.1)) IMOD2=0
-
-      ! ------------ Set to modify all rates, if selected (just atoms)
-      if (MODIFY_RATE_FLAG.EQ.3) then
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'H       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'He      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'C       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'N       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'O       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'S       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Si      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Fe      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Na      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Mg      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'P       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'F       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Cl      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
-        
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'H       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'He      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'C       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'N       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'O       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'S       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Si      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Fe      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Na      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Mg      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'P       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'F       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Cl      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
-      endif
+      IMOD1=IMOD1_FINAL(J)
+      IMOD2=IMOD2_FINAL(J)
 
       ! ------------ Modify rates (DIFFUSION_RATE_1 & DIFFUSION_RATE_2) according to their own evap/acc rates
       YMOD1=Y(reactant_1_idx(J))
@@ -1712,20 +1668,18 @@ abCO(1:nb_grains) = 0.d0
     
     ! If the number of mantle layer is > 1, we consider that t(diff) (the time required by a species to 
     ! scan the entire grain sites) is given by the Number of sites on a layer time the number of layer time t(hop)
-    IF(any(REACTION_COMPOUNDS_NAMES(:,j)(1:1).eq."K").AND.sumlaymant(GRAIN_RANK(J)).gt.1.0d0) THEN
+    IF(HAS_MANTLE_COMPOUND(J).AND.sumlaymant(GRAIN_RANK(J)).gt.1.0d0) THEN
       reaction_rates(J) = reaction_rates(J) / sumlaymant(GRAIN_RANK(J))
     ENDIF
 
-    ! H2 formation by LH mechanism is turned off when the ad hoc formation of H2 is activated
-    IF ((reaction_compounds_names(1,J)(4:11).EQ.'H       ').AND.(reaction_compounds_names(2,J)(4:11).EQ.'H       ') &
-       .AND. (reaction_compounds_names(1,J)(1:1).EQ.'J').AND.(reaction_compounds_names(2,J)(1:1).EQ.'J')) then
-    ENDIF
+    ! H2 formation by LH mechanism is turned off when the ad hoc formation of H2
+    ! is activated (handled elsewhere; the former empty JH+JH guard here did
+    ! nothing and is removed).
 
     ! "Encounter desorption" process for JH2 (Hincelin et al. 2014,A&A)
     ! The reaction JH2+JH2->JH2+H2 must be in the grain_reactions.in file to be accounted
     ! in practice the dominant processes are really the thermal hoping and thermal desorption of H2.
-    if ((reaction_compounds_names(1,J)(4:11).EQ.'H2      ').AND.(reaction_compounds_names(2,J)(4:11).EQ.'H2      ') &
-        .AND. (reaction_compounds_names(1,J)(1:1).EQ.'J') .AND. (reaction_compounds_names(2,J)(1:1).EQ.'J')) then
+    if (IS_H2H2_SURFACE(J)) then
        PROBH2H2=EVAPORATION_RATES_TEMPO_H2(GRAIN_RANK(J))/(VIBRATION_FREQUENCY(reactant_1_idx(J))* &
        EXP(-diff_binding_ratio_surf*ED_H2/actual_dust_temp(GRAIN_RANK(J)))/nb_sites_per_grain(GRAIN_RANK(J))+ &
        EVAPORATION_RATES_TEMPO_H2(GRAIN_RANK(J)))

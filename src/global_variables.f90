@@ -162,6 +162,19 @@ integer, allocatable, dimension(:) :: SPECIES_PHASE         ! dim(nb_species): 1
 integer, allocatable, dimension(:) :: SPECIES_ICE_CODE      ! dim(nb_species): tracked surface ice, 0 none / 1 CO / 2 H2O / 3 NH3 / 4 CO2 / 5 CH4 / 6 CH3OH (J phase only)
 integer, allocatable, dimension(:) :: REACTION_C4_GRAIN_RANK ! dim(nb_reactions): grain rank from REACTION_COMPOUNDS_NAMES(4,i)(2:3) when J/K-prefixed, else 0
 
+! ---- stage-4 Part 1b: IMOD classification + ANY/ER flags, precomputed once ----
+! MODIFY_RATE_FLAG and GRAIN_TUNNELING_DIFFUSION are run-constants, so the whole
+! IMOD classification of a type-14 grain-surface reaction is a pure function of
+! (reaction, config). IMOD*_base feeds the tunnelling gate; IMOD*_final (base
+! transformed by the MODIFY_RATE_FLAG block) feeds modify_specific_rates. These
+! replace the per-RHS-call name comparisons; the per-call physics is untouched.
+integer, allocatable, dimension(:) :: IMOD1_BASE, IMOD2_BASE   ! dim(nb_reactions)
+integer, allocatable, dimension(:) :: IMOD1_FINAL, IMOD2_FINAL ! dim(nb_reactions)
+logical, allocatable, dimension(:) :: HAS_SURFACE_COMPOUND     ! dim(nb_reactions): ANY compound is a 'J' species
+logical, allocatable, dimension(:) :: HAS_MANTLE_COMPOUND      ! dim(nb_reactions): ANY compound is a 'K' species
+logical, allocatable, dimension(:) :: IS_H2H2_SURFACE          ! dim(nb_reactions): both reactants are JH2 (encounter desorption)
+integer, allocatable, dimension(:) :: ER_PATTERN               ! dim(nb_reactions): 0 none / 1 C / 2 CH / 3 O (Eley-Rideal accretion correction)
+
 ! 3 phase model
 REAL(double_precision), allocatable, dimension(:) :: sumlaysurfsave !< Total number of layers on the grain surface
 ! REAL(double_precision), dimension(1:nb_grains) :: sumlaysurfsave !< Total number of layers on the grain surface

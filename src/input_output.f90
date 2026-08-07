@@ -1543,7 +1543,83 @@ do i=1,nb_reactions
   endif
 enddo
 
+! per-reaction IMOD classification + ANY/ER flags (stage-4 Part 1b). Mirrors the
+! name comparisons that the type-14 grain-surface loop and the ER/CIR accretion
+! corrections used to do on every RHS call. Computed for all reactions; only the
+! grain-surface / ER reactions ever read them.
+if (.not.allocated(IMOD1_BASE))           allocate(IMOD1_BASE(nb_reactions))
+if (.not.allocated(IMOD2_BASE))           allocate(IMOD2_BASE(nb_reactions))
+if (.not.allocated(IMOD1_FINAL))          allocate(IMOD1_FINAL(nb_reactions))
+if (.not.allocated(IMOD2_FINAL))          allocate(IMOD2_FINAL(nb_reactions))
+if (.not.allocated(HAS_SURFACE_COMPOUND)) allocate(HAS_SURFACE_COMPOUND(nb_reactions))
+if (.not.allocated(HAS_MANTLE_COMPOUND))  allocate(HAS_MANTLE_COMPOUND(nb_reactions))
+if (.not.allocated(IS_H2H2_SURFACE))      allocate(IS_H2H2_SURFACE(nb_reactions))
+if (.not.allocated(ER_PATTERN))           allocate(ER_PATTERN(nb_reactions))
+
+do i=1,nb_reactions
+  ! ---- IMOD base: JH / JH2 / JO on reactant 1 and reactant 2 (mirrors the
+  !      independent name tests; the three names are mutually exclusive) ----
+  IMOD1_BASE(i) = 0
+  IMOD2_BASE(i) = 0
+  if (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J') IMOD1_BASE(i)=1
+  if (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J') IMOD1_BASE(i)=2
+  if (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J') IMOD1_BASE(i)=3
+  if (REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J') IMOD2_BASE(i)=1
+  if (REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J') IMOD2_BASE(i)=2
+  if (REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J') IMOD2_BASE(i)=3
+
+  ! ---- ANY(J) / ANY(K) over all compound slots ----
+  HAS_SURFACE_COMPOUND(i) = ANY(REACTION_COMPOUNDS_NAMES(:,i)(1:1).eq.'J')
+  HAS_MANTLE_COMPOUND(i)  = ANY(REACTION_COMPOUNDS_NAMES(:,i)(1:1).eq.'K')
+
+  ! ---- encounter desorption: both reactants are JH2 ----
+  IS_H2H2_SURFACE(i) = (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'H2      '.AND. &
+                        REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'H2      '.AND. &
+                        REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J'.AND. &
+                        REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J')
+
+  ! ---- Eley-Rideal accretion-correction pattern (reactant 1 C/CH/O whose
+  !      product slot 4 is the matching J species) ----
+  ER_PATTERN(i) = 0
+  if (REACTION_COMPOUNDS_NAMES(1,i)=="C          ".AND.REACTION_COMPOUNDS_NAMES(4,i)(4:11)=="C       ".AND. &
+      REACTION_COMPOUNDS_NAMES(4,i)(1:1)=="J") ER_PATTERN(i)=1
+  if (REACTION_COMPOUNDS_NAMES(1,i)=="CH         ".AND.REACTION_COMPOUNDS_NAMES(4,i)(4:11)=="CH      ".AND. &
+      REACTION_COMPOUNDS_NAMES(4,i)(1:1)=="J") ER_PATTERN(i)=2
+  if (REACTION_COMPOUNDS_NAMES(1,i)=="O          ".AND.REACTION_COMPOUNDS_NAMES(4,i)(4:11)=="O       ".AND. &
+      REACTION_COMPOUNDS_NAMES(4,i)(1:1)=="J") ER_PATTERN(i)=3
+
+  ! ---- IMOD final: base transformed by the MODIFY_RATE_FLAG block (a run
+  !      constant), reproducing lines that ran per call inside "if any-J". ----
+  IMOD1_FINAL(i) = IMOD1_BASE(i)
+  IMOD2_FINAL(i) = IMOD2_BASE(i)
+  if ((MODIFY_RATE_FLAG.EQ.-1).AND.(IMOD1_FINAL(i).NE.1.OR.IMOD2_FINAL(i).NE.1)) then
+    IMOD1_FINAL(i)=0
+    IMOD2_FINAL(i)=0
+  endif
+  if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD1_FINAL(i).NE.1)) IMOD1_FINAL(i)=0
+  if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD2_FINAL(i).NE.1)) IMOD2_FINAL(i)=0
+  if (MODIFY_RATE_FLAG.EQ.3) then
+    if (is_mod3_atom(REACTION_COMPOUNDS_NAMES(1,i))) IMOD1_FINAL(i)=3
+    if (is_mod3_atom(REACTION_COMPOUNDS_NAMES(2,i))) IMOD2_FINAL(i)=3
+  endif
+enddo
+
 return
+
+contains
+
+  ! true iff nm is a J-phase atom in the MODIFY_RATE_FLAG==3 list (the same 13
+  ! atoms the per-call code tested for, identically for reactant 1 and 2).
+  logical function is_mod3_atom(nm)
+    character(len=*), intent(in) :: nm
+    is_mod3_atom = (nm(1:1).EQ.'J') .AND. ( &
+         nm(4:11).EQ.'H       '.OR.nm(4:11).EQ.'He      '.OR.nm(4:11).EQ.'C       '.OR. &
+         nm(4:11).EQ.'N       '.OR.nm(4:11).EQ.'O       '.OR.nm(4:11).EQ.'S       '.OR. &
+         nm(4:11).EQ.'Si      '.OR.nm(4:11).EQ.'Fe      '.OR.nm(4:11).EQ.'Na      '.OR. &
+         nm(4:11).EQ.'Mg      '.OR.nm(4:11).EQ.'P       '.OR.nm(4:11).EQ.'F       '.OR. &
+         nm(4:11).EQ.'Cl      ')
+  end function is_mod3_atom
+
 end subroutine build_index_maps
 
 
