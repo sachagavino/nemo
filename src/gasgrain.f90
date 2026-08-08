@@ -193,6 +193,10 @@ call init_relevant_reactions()
 !! the jacobian
 call count_nonzeros()
 
+! In symbolic mode, build the fixed sparsity superset once from the reaction list
+! (also raises nb_nonzeros_values to the symbolic per-column max for work sizing).
+if (sparsity.eq.'symbolic') call build_symbolic_sparsity()
+
 
 ! Do preliminary tests, before starting the integration
 ! Writing information in 'info.out'

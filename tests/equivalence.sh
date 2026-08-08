@@ -35,6 +35,21 @@ done
 cp "$CASE/dust_grid_table.in" "$WORK/ref/0D_grain_sizes.in"
 rm -f "$WORK/ref/dust_grid_table.in"
 
+# The reference (nmgc-2.0) uses the numerical Jacobian sparsity. The symbolic
+# path is a deliberate, non-bit-identical stage-4 change, so pin the NEMO side to
+# numerical for this equivalence test -- otherwise the default build diverges
+# from the reference by construction. (nmgc-2.0 has no 'sparsity' key and never
+# sees one; it is numerical inherently.)
+python3 - "$WORK/new/parameters.in" <<'PY'
+import sys, re
+p = sys.argv[1]; s = open(p).read()
+if re.search(r'(?m)^sparsity\s*=', s):
+    s = re.sub(r'(?m)^(sparsity\s*=\s*)\S+', r'\g<1>numerical', s)
+else:
+    s += '\nsparsity = numerical\n'
+open(p, 'w').write(s)
+PY
+
 # the reference still needs the parameters NEMO has dropped
 cp "$REF_REPO/inputs/parameters.in" "$WORK/ref/parameters.in"
 python3 - "$WORK/ref/parameters.in" "$CASE/parameters.in" <<'PY'

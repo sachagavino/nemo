@@ -413,6 +413,13 @@ use global_variables
     ' ! MRN exponent dn/da ~ a^index (-3.5 = MRN), normalised by initial_dtg_mass_ratio'
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
+  write(10,'(a)') "!*   Jacobian sparsity       *"
+  write(10,'(a)') "!*****************************"
+  write(10,'(a,a,a)') 'sparsity = ', trim(sparsity), ' ! symbolic (default) or numerical (pin for the nmgc-2.0 equivalence test)'
+  write(10,'(a,i0,a)') 'sparsity_check_steps = ', sparsity_check_steps, &
+    ' ! debug: assert numerical nonzeros subset symbolic on the first N steps (0 disables)'
+  write(10,'(a)') ""
+  write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*      Grain parameters     *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
@@ -864,6 +871,10 @@ if (isDefined) then
         read(value, *) dust_grid_source
       case('dust_ic')
         read(value, *) dust_ic
+      case('sparsity')
+        read(value, *) sparsity
+      case('sparsity_check_steps')
+        read(value, '(i8)') sparsity_check_steps
         
       case('diffusion_barrier_thickness', 'ACM') ! The old name is kept for compatibility reasons
         read(value, '(e12.6)') DIFFUSION_BARRIER_THICKNESS

@@ -64,6 +64,8 @@ mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins der
 !*****************************
 dust_ic = MRN ! MRN | tabulated
 dust_power_law_index = -3.500E+00 ! dn/da ~ a^index (-3.5 = MRN); normalised by initial_dtg_mass_ratio
+sparsity = symbolic ! symbolic (default) or numerical
+sparsity_check_steps = 5 ! debug: assert numerical subset symbolic on first N steps (0 disables)
 
 !*****************************
 !*      Grain parameters     *

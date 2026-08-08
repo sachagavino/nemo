@@ -414,6 +414,20 @@ real(double_precision), dimension(:), allocatable :: RWORK !< dim(lrw) real work
 !!\n          output, available in IWORK(17).)
 integer :: nb_nonzeros_values !< number of non-zeros values in the jacobian. This is usefull for ODEPACK, to increase speed
 
+! ---- stage-4 Part 2: Jacobian sparsity method ----
+! 'numerical' rebuilds the pattern every step by evaluating the Jacobian and
+! thresholding at 1e-99 (the pre-stage-4 behaviour; value-dependent, so it drops
+! genuinely-nonzero-but-tiny couplings and varies step to step). 'symbolic'
+! builds one fixed superset once from the reaction list, so no real coupling is
+! ever dropped. Default symbolic; 'numerical' is kept for exact reproduction of
+! pre-stage-4 / nmgc-2.0 results (equivalence.sh must pin it).
+character(len=80) :: sparsity = 'symbolic'   !< 'symbolic' or 'numerical'
+integer :: sparsity_check_steps = 5          !< debug: on the first N set_work_arrays calls, assert numerical nonzeros subset of the symbolic pattern (0 disables). Symbolic mode only.
+integer, allocatable, dimension(:) :: IA_SYM !< dim(nb_species+1) column pointers of the symbolic pattern (CSC)
+integer, allocatable, dimension(:) :: JA_SYM !< row indices of the symbolic pattern (CSC), ascending within each column
+integer :: NNZ_SYM = 0                        !< number of nonzeros in the symbolic pattern
+integer :: n_sparsity_checks_done = 0         !< how many startup subset-asserts have run
+
 ! Diffusion and 1D variables
 real(double_precision) :: X_IONISATION_RATE !< Ionisation rate due to X-rays [s-1]
 real(double_precision) :: NH  ! column density [cm-2] (for the self shielding)

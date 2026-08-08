@@ -180,6 +180,203 @@ return
 end subroutine count_nonzeros
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Build the Jacobian sparsity pattern ONCE, symbolically, from the
+!! reaction list -- a fixed superset of the numerical pattern, with no
+!! value-dependent pruning anywhere (so no temperature-window / small-rate
+!! coupling is ever dropped). Entry (row=i, col=j) is marked whenever species j
+!! is a reactant of some reaction and i is any compound (reactant or product) of
+!! that reaction -- exactly the entries get_jacobian can write -- plus the
+!! diagonal. The couplings are assembled into an explicit list first, so future
+!! coagulation terms can append their (row, col) couplings before the CSC
+!! pattern is finalised, without rewriting this routine.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine build_symbolic_sparsity()
+use global_variables
+implicit none
+
+integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol
+integer(kind=8) :: N1
+integer(kind=8), allocatable :: keys(:)
+integer, dimension(MAX_COMPOUNDS) :: reac, comp
+integer :: nreac, ncomp, a, b
+
+no_species = nb_species + 1
+N1 = int(nb_species, 8) + 1_8
+
+! ---- pass 1: upper-bound the number of couplings (duplicates allowed) ----
+ncoup = nb_species                                  ! the diagonal
+do r=1,nb_reactions
+  nreac = 0 ; ncomp = 0
+  do s=1,MAX_REACTANTS
+    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) nreac = nreac + 1
+  enddo
+  do s=1,MAX_COMPOUNDS
+    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) ncomp = ncomp + 1
+  enddo
+  ncoup = ncoup + nreac*ncomp
+enddo
+
+allocate(keys(ncoup))
+
+! ---- pass 2: emit one key per (col=reactant, row=any compound) coupling ----
+m = 0
+do r=1,nb_reactions
+  nreac = 0 ; ncomp = 0
+  do s=1,MAX_REACTANTS
+    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) then
+      nreac = nreac + 1 ; reac(nreac) = REACTION_COMPOUNDS_ID(s,r)
+    endif
+  enddo
+  do s=1,MAX_COMPOUNDS
+    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) then
+      ncomp = ncomp + 1 ; comp(ncomp) = REACTION_COMPOUNDS_ID(s,r)
+    endif
+  enddo
+  do a=1,nreac
+    jcol = reac(a)
+    do b=1,ncomp
+      irow = comp(b)
+      m = m + 1
+      keys(m) = int(jcol,8)*N1 + int(irow,8)
+    enddo
+  enddo
+enddo
+do irow=1,nb_species                                ! diagonal
+  m = m + 1
+  keys(m) = int(irow,8)*N1 + int(irow,8)
+enddo
+
+! ---- pass 3: sort ascending (key = col*(N+1)+row -> sorts by column then row) ----
+call heapsort_i8(keys, ncoup)
+
+! ---- pass 4: dedupe consecutive keys, emit CSC (IA_SYM, JA_SYM) ----
+if (.not.allocated(IA_SYM)) allocate(IA_SYM(nb_species+1))
+if (.not.allocated(JA_SYM)) allocate(JA_SYM(ncoup))
+jj = 0
+c_prev = 0
+do m=1,ncoup
+  if (m.gt.1 .and. keys(m).eq.keys(m-1)) cycle
+  jcol = int(keys(m)/N1)
+  irow = int(keys(m) - int(jcol,8)*N1)
+  if (jcol.ne.c_prev) then
+    do curcol = c_prev+1, jcol
+      IA_SYM(curcol) = jj+1
+    enddo
+    c_prev = jcol
+  endif
+  jj = jj + 1
+  JA_SYM(jj) = irow
+enddo
+do curcol = c_prev+1, nb_species
+  IA_SYM(curcol) = jj+1
+enddo
+IA_SYM(nb_species+1) = jj+1
+NNZ_SYM = jj
+
+! ---- size the solver work arrays for the (denser) symbolic pattern ----
+maxcol = 0
+do curcol=1,nb_species
+  cnt = IA_SYM(curcol+1) - IA_SYM(curcol)
+  if (cnt.gt.maxcol) maxcol = cnt
+enddo
+nb_nonzeros_values = max(nb_nonzeros_values, maxcol)
+
+deallocate(keys)
+return
+
+contains
+
+  logical function valid_species(idx)
+    integer, intent(in) :: idx
+    valid_species = (idx.ne.no_species .and. idx.ge.1 .and. idx.le.nb_species)
+  end function valid_species
+
+  ! ascending in-place heapsort of an int64 array (init-time, no recursion)
+  subroutine heapsort_i8(a, n)
+    integer, intent(in) :: n
+    integer(kind=8), intent(inout) :: a(n)
+    integer :: start, end_, root, child
+    integer(kind=8) :: tmp
+    do start = n/2, 1, -1
+      root = start
+      do
+        child = 2*root
+        if (child.gt.n) exit
+        if (child+1.le.n) then
+          if (a(child).lt.a(child+1)) child = child + 1
+        endif
+        if (a(root).lt.a(child)) then
+          tmp = a(root) ; a(root) = a(child) ; a(child) = tmp
+          root = child
+        else
+          exit
+        endif
+      enddo
+    enddo
+    do end_ = n, 2, -1
+      tmp = a(1) ; a(1) = a(end_) ; a(end_) = tmp
+      root = 1
+      do
+        child = 2*root
+        if (child.gt.end_-1) exit
+        if (child+1.le.end_-1) then
+          if (a(child).lt.a(child+1)) child = child + 1
+        endif
+        if (a(root).lt.a(child)) then
+          tmp = a(root) ; a(root) = a(child) ; a(child) = tmp
+          root = child
+        else
+          exit
+        endif
+      enddo
+    enddo
+  end subroutine heapsort_i8
+
+end subroutine build_symbolic_sparsity
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Debug guard: assert every numerically-nonzero Jacobian entry at the
+!! current state lies inside the symbolic pattern. By construction it must, so
+!! this never fires; if it ever does, the symbolic builder has a bug (a real
+!! coupling is missing), not a tolerance to relax. Run only on the first few
+!! steps in symbolic mode.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine assert_numerical_subset_symbolic(Y)
+use global_variables
+implicit none
+real(double_precision), intent(in), dimension(nb_species) :: Y
+real(double_precision), dimension(nb_species) :: PDJ
+integer, parameter :: dummy_n = 3
+real(double_precision), parameter :: dummy_t = 0.d0
+real(double_precision), dimension(dummy_n) :: dummy_ian, dummy_jan
+integer :: i, j, k
+logical :: found
+
+do j=1,nb_species
+  call get_jacobian(n=dummy_n, t=dummy_t, y=Y, j=j, ian=dummy_ian, jan=dummy_jan, pdj=PDJ)
+  do i=1,nb_species
+    if (PDJ(i).ne.0.d0) then
+      found = .false.
+      do k=IA_SYM(j), IA_SYM(j+1)-1
+        if (JA_SYM(k).eq.i) then
+          found = .true.
+          exit
+        endif
+      enddo
+      if (.not.found) then
+        write(Error_unit,*) 'FATAL: symbolic sparsity pattern is missing a numerically-nonzero'
+        write(Error_unit,*) 'Jacobian entry (row,col) = ', i, j, ' -- the builder has a bug.'
+        stop
+      endif
+    endif
+  enddo
+enddo
+
+return
+end subroutine assert_numerical_subset_symbolic
+
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @author 
 !> Christophe Cossou & Franck Hersant
 !
@@ -2236,27 +2433,43 @@ if (.not.(first_step_done)) then
   IWORK(6)=10000
 endif
 
-k=1
+if (sparsity.eq.'symbolic') then
 
-do j=1,nb_species
-  call get_jacobian(n=dummy_n, t=dummy_t, y=Y,j=J,ian=dummy_ian, jan=dummy_jan, pdj=PDJ)
+  ! ---- symbolic: reuse the fixed pattern built once at init ----
+  if (sparsity_check_steps.gt.0 .and. n_sparsity_checks_done.lt.sparsity_check_steps) then
+    call assert_numerical_subset_symbolic(Y)
+    n_sparsity_checks_done = n_sparsity_checks_done + 1
+  endif
+  NNZ = NNZ_SYM
+  iwork(30+1:30+nb_species+1)         = IA_SYM(1:nb_species+1)
+  iwork(31+nb_species+1:31+nb_species+NNZ) = JA_SYM(1:NNZ)
 
-  IA(j)=k
+else
 
-  do i=1,nb_species
-    if (abs(PDJ(i)).gt.1.d-99) then
-      JA(k)=i
-      k=k+1
-    endif
+  ! ---- numerical: rebuild the pattern this step by thresholding the Jacobian ----
+  k=1
+
+  do j=1,nb_species
+    call get_jacobian(n=dummy_n, t=dummy_t, y=Y,j=J,ian=dummy_ian, jan=dummy_jan, pdj=PDJ)
+
+    IA(j)=k
+
+    do i=1,nb_species
+      if (abs(PDJ(i)).gt.1.d-99) then
+        JA(k)=i
+        k=k+1
+      endif
+    enddo
+
   enddo
 
-enddo
+  IA(nb_species+1)=k
 
-IA(nb_species+1)=k
+  NNZ=IA(nb_species+1)-1
+  iwork(30+1:30+nb_species+1)=IA(1:nb_species+1)
+  iwork(31+nb_species+1:31+nb_species+NNZ)=JA(1:NNZ)
 
-NNZ=IA(nb_species+1)-1
-iwork(30+1:30+nb_species+1)=IA(1:nb_species+1)
-iwork(31+nb_species+1:31+nb_species+NNZ)=JA(1:NNZ)
+endif
 
 return
 end subroutine set_work_arrays

@@ -33,6 +33,8 @@ is_crid = 0 ! Switch to turn on the CRID (cosmic rays induced diffusion) mechani
 is_er_cir = 0 ! Switch to turn on Eley-Rideal and Complex Induced Reaction mechanisms (default=0: desactivated)
 grain_tunneling_diffusion = 0 ! 0=thermal; For H,H2: 1=QM1; 2=QM2; 3=choose fastest
 modify_rate_flag = 0 ! 1=modify H; 2=modify H,H2, 3=modify all, -1=H+H only
+sparsity = numerical ! symbolic (default) or numerical
+sparsity_check_steps = 5 ! debug: assert numerical subset symbolic on first N steps (0 disables)
 conservation_type = 0 ! 0=only e- conserved; 1=elem #1 conserved, 2=elem #1 & #2, etc
 
 !*****************************
