@@ -51,34 +51,65 @@ dY_k/dt = (1/2) * sum_{i,j} M_ijk * K_ij * nH * Y_i * Y_j        [gain]
 - `M_ijk`    = Podolak/Brauer redistribution coefficient (dimensionless),
                frozen at init; nonzero only for the two bins bracketing m_i+m_j
 
-### The rate coefficient of the generated reactions (THE landmine — get this exact)
+### Reaction encoding: per-product weight field (DESIGN DECISION — supersedes earlier notation)
 
-**Convention: write each UNORDERED pair (i,j) once.** Under that convention:
+The current reaction arrays have **no stoichiometric-coefficient mechanism**: every
+filled product slot receives the full `RATE`, with no per-product weight. The
+redistribution needs fractional deposits (`epsilon` into bin k, `1-epsilon` into
+k+1), which cannot be encoded as-is. Resolution, decided in the design thread:
+
+**Extend the reaction record with a per-product weight field, default 1.0.** This is
+NOT the "new solver code" the brief warns against — that warning is about the
+*integrator* (no operator splitting, no separate dust ODE, DLSODES/Newton/Jacobian
+machinery untouched). A per-product weight in the reaction *table*, read by the
+existing RHS assembly loop, is a local data-structure extension. With weight = 1.0
+for every existing chemical reaction, all current chemistry is reproduced
+**bit-identically** (the equivalence tests must still pass). The weighted deposit is:
 
 ```
-OFF-DIAGONAL  (i != j):
-    grain gain into k:   R = M_ijk * K_ij          (NO explicit 1/2)
-    grain loss:          bin i and bin j each lose one grain per event
-    => generated:  GRAIN_i + GRAIN_j  ->  (M_ijk) GRAIN_k + (M_ij,k+1) GRAIN_{k+1}
-
-DIAGONAL      (i == j):
-    grain gain into k:   R = (1/2) * M_iik * K_ii   (explicit 1/2, COMBINATORIAL)
-    grain loss:          bin i loses TWO grains per event
-    => generated:  GRAIN_i + GRAIN_i  ->  ...
+contribution to dY(product_p)/dt  =  w_p * R * Y(r1) * Y(r2) * nH
 ```
 
-The `1/2` lives **only on the diagonal**, and it is the combinatorial factor
+**One reaction per unordered pair. Loss counted once; gain split by weights.** Do
+NOT split a pair into one reaction per product bin — that would double-count the
+loss (the reactant depletion fires once per split reaction). Instead:
+
+```
+UNORDERED pair (i,j), product bins k and k+1:
+    ONE generated reaction:
+      reactants:  GRAIN_i , GRAIN_j          (loss: depletes each once, full rate)
+      products:   GRAIN_k (weight epsilon) , GRAIN_{k+1} (weight 1-epsilon)   (gain)
+    rate coefficient R:
+      i != j :  R = K_ij           (loss counted once; NO 1/2)
+      i == j :  R = (1/2) * K_ii    (explicit 1/2, COMBINATORIAL — see below)
+```
+
+The `M_ijk` of the Smoluchowski equation are realized as these product weights
+(`epsilon`, `1-epsilon`), NOT folded into the rate. The rate carries only `K_ij`
+(and the diagonal 1/2).
+
+**The 1/2 lives ONLY on the diagonal (i == j)**, and it is the combinatorial factor
 `n_i(n_i-1)/2 ~ n_i^2/2` (distinct pairs drawn from n_i identical grains), NOT a
-double-counting correction. Off-diagonal pairs carry no `1/2` because each
-unordered pair is written once.
+double-counting correction. Off-diagonal pairs carry no 1/2 because each unordered
+pair is written once. **Before writing any generated reaction, determine how the
+existing RHS handles two identical reactants** (`GRAIN_i + GRAIN_i`, or the
+chemistry's `H + H` surface reactions). If the code already applies a 1/2 (or an
+`n(n-1)` vs `n^2` distinction) for identical reactants, the generated diagonal `R`
+must NOT double it. Match the existing convention exactly. A factor-of-2 error here
+is invisible until it shows up as dust-mass drift — exactly what the rung-1
+diagnostic catches.
 
-**Before writing any generated reaction, determine how the existing RHS handles a
-reaction with two identical reactants** (`GRAIN_i + GRAIN_i`, or the chemistry's
-`H + H` surface reactions). If the code already applies a `1/2` (or an `n(n-1)`
-vs `n^2` distinction) for identical reactants, the generated diagonal `R` must NOT
-double it. Match the existing convention exactly. A factor-of-2 error here is
-invisible until it shows up as dust-mass drift — which is exactly what the rung-1
-diagnostic is built to catch.
+**The weight field MUST flow into the Jacobian, not just the RHS.** A weighted
+product deposit `w_p * R * Y_i * Y_j` has partials `w_p * R * Y_j` and
+`w_p * R * Y_i`. If the Jacobian assembly reads the same product records, it
+inherits `w_p` for free; if there is a separate Jacobian code path, apply the weight
+there too. Verify this explicitly — a weight that reaches the RHS but not the
+Jacobian gives a correct derivative value with a wrong Jacobian, degrading Newton
+silently.
+
+**The same weight field serves ice transport** (ice-follows-particle uses the same
+`epsilon`), so this is the general mechanism for all of Phase II, not a rung-1
+special case.
 
 ### Mass conservation identity (the diagnostic's basis)
 
@@ -169,9 +200,35 @@ empty. Value set empirically.
 ### Rung 1 — Pure grain coagulation
 ADD: grains-as-species coagulation (redistribution + gain/loss + both kernels).
 Chemistry OFF, ice OFF.
+
+CONFIGURATION (how "chemistry off, ice off" is realized): **build a minimal,
+self-contained input set** — a species file with only `GRAIN_k`, a reaction file
+with only the generated coagulation reactions, no gas-phase or surface chemistry.
+Do NOT rely on a runtime "disable chemistry" flag (one may not exist, and a flag
+can leak). A minimal fixture is chemistry-free *by construction*, inspectable, and
+becomes a permanent regression fixture for the coagulation sector. First confirm by
+experiment the minimal species/reaction set the initializer will accept (strip to
+grains, see what it demands — it may require a couple of dummy gas species to
+initialize; if so, include them inert).
+
 DIAGNOSTIC (both must pass):
-  (a) dust mass `sum_k m_k Y_k` conserved to machine precision throughout;
-  (b) constant-kernel run matches the analytic Smoluchowski solution.
+  (a) **Total mass — machine precision.** `sum_k m_k Y_k` conserved throughout.
+      This is the factor-of-2 trap: any drift = inconsistent gain/loss factor.
+  (b) **Number decay vs analytic — discretization-limited, ~5%.** IC = monodisperse
+      (all mass in bin 1, rest at floor). Kernel = constant, `K_ij = K0`. Compare
+      the zeroth moment `M0(t) = sum_k n_k` against the analytic constant-kernel
+      solution
+          `M0(t) = M0(0) / (1 + (1/2) K0 M0(0) t)`
+      at several times. Pass at rtol ~ 5% on the fiducial grid. Do NOT expect
+      machine precision on (b) — the binned scheme approximates the continuous
+      solution. THEN **demonstrate convergence**: refine the grid (smaller
+      `mass_ratio`) and show the agreement tightening toward the analytic curve.
+      The convergence demonstration is the real validation of the redistribution
+      scheme and is a paper figure, not busywork.
+      (Get the exact analytic form and its citation from Lombart & Laibe 2021,
+      whose test cases these are — this also fixes the placeholder citation in the
+      paper draft.)
+
 This rung traps the self-collision factor-of-2 and validates redistribution.
 Do NOT add ice or chemistry.
 
@@ -211,9 +268,16 @@ DIAGNOSTIC (in order):
 
 ## 4. Landmine checklist (the places design effort was spent)
 
+0. **Product-weight field must reach the Jacobian, not just the RHS** (section 0).
+   The weight defaults to 1.0 (existing chemistry bit-identical) and realizes the
+   `epsilon`/`1-epsilon` redistribution. A weight applied in the RHS but missing
+   from the Jacobian gives correct derivatives with a wrong Jacobian — silent Newton
+   degradation. Verify both paths carry `w_p`. Foundational: this encoding underlies
+   every generated reaction in Phase II (grains AND ice).
 1. **Self-collision factor-of-2** (section 0). The `1/2` is diagonal-only and
-   combinatorial. Match the existing identical-reactant convention. Caught by
-   rung-1 mass conservation.
+   combinatorial. It rides on the rate `R`, NOT on the product weights. One reaction
+   per unordered pair (loss once); do not split per product bin. Match the existing
+   identical-reactant convention. Caught by rung-1 mass conservation.
 2. **Ice-weight conservation.** Ice-follows-particle conserves by construction
    ONLY if the ice uses the same epsilon as the grains. Do not independently
    recompute an ice weight. Caught by rung-2 per-species ice conservation.
