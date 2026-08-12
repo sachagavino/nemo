@@ -227,6 +227,12 @@ integer, allocatable, dimension(:) :: SPECIES_CHARGE !< dim(nb_species) !< elect
 character(len=11), allocatable, dimension(:,:) :: REACTION_COMPOUNDS_NAMES !< dim(MAX_COMPOUNDS,nb_reactions). Empty string means no species
 integer, allocatable, dimension(:,:) :: REACTION_COMPOUNDS_ID !< dim(MAX_COMPOUNDS, nb_reactions) for all reactions, 
 !! list for reactants (first 3) and products (last 5). "nb_species+1" means no species
+real(double_precision), allocatable, dimension(:,:) :: REACTION_PRODUCT_WEIGHTS !< dim(MAX_COMPOUNDS, nb_reactions).
+!! Per-product stoichiometric weight w_p applied to the GAIN deposit of each product slot p (compound slots
+!! MAX_REACTANTS+1..MAX_COMPOUNDS). Default 1.0 reproduces existing chemistry bit-identically. Coagulation and
+!! ice-transport pseudo-reactions store the Podolak/Brauer redistribution weights (epsilon, 1-epsilon) here.
+!! The rate coefficient carries only K_ij (and the diagonal 1/2); the weight carries M_ijk. Loss (reactant
+!! depletion) is NEVER weighted. Reactant slots (1..MAX_REACTANTS) are unused and stay 1.0.
 real(double_precision), allocatable, dimension(:) :: branching_ratio !< dim(nb_reactions) Branching ratio of each reaction
 real(double_precision), allocatable, dimension(:) :: RATE_A !< dim(nb_reactions) Coefficient used to compute the reaction rate. Formula (and unit) is different in function of the reaction type.
 real(double_precision), allocatable, dimension(:) :: RATE_B !< dim(nb_reactions) Coefficient used to compute the reaction rate. Formula (and unit) is different in function of the reaction type.
@@ -799,6 +805,9 @@ REACTION_ID(1:nb_reactions) = 0
 
 allocate(REACTION_COMPOUNDS_ID(MAX_COMPOUNDS,nb_reactions))
 REACTION_COMPOUNDS_ID(1:MAX_COMPOUNDS,1:nb_reactions) = 0
+
+allocate(REACTION_PRODUCT_WEIGHTS(MAX_COMPOUNDS,nb_reactions))
+REACTION_PRODUCT_WEIGHTS(1:MAX_COMPOUNDS,1:nb_reactions) = 1.d0
 
 allocate(REACTION_COMPOUNDS_NAMES(MAX_COMPOUNDS,nb_reactions))
 REACTION_COMPOUNDS_NAMES(1:MAX_COMPOUNDS,1:nb_reactions) = ''

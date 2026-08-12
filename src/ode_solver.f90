@@ -452,6 +452,7 @@ integer :: reaction_idx ! The index of a given reaction
 ! Temp values to increase speed
 real(double_precision) :: H_number_density_squared ! H_number_density*H_number_density, to gain speed
 real(double_precision) :: tmp_value ! To optimize speed, temporary variable is created to avoid multiple calculation of the same thing
+real(double_precision) :: w1, w2, w3, w4, w5 ! per-product gain weights (compound slots 4..8); MUST match the RHS weighting
 
 no_species=nb_species+1 ! Index corresponding to no species (meaning that there is no 3rd reactant for instance
 
@@ -471,6 +472,15 @@ do i=1,nb_reactions_using_species(j)
   product3_idx = REACTION_COMPOUNDS_ID(6, reaction_idx)
   product4_idx = REACTION_COMPOUNDS_ID(7, reaction_idx)
   product5_idx = REACTION_COMPOUNDS_ID(8, reaction_idx)
+
+  ! Same per-product weights as the RHS. The weighted deposit w_p*R*Y_i*Y_j has
+  ! partials w_p*R*Y_j and w_p*R*Y_i, so w_p MUST appear here too; a weight in the
+  ! RHS but not the Jacobian gives a correct derivative value with a wrong Jacobian.
+  w1 = REACTION_PRODUCT_WEIGHTS(4, reaction_idx)
+  w2 = REACTION_PRODUCT_WEIGHTS(5, reaction_idx)
+  w3 = REACTION_PRODUCT_WEIGHTS(6, reaction_idx)
+  w4 = REACTION_PRODUCT_WEIGHTS(7, reaction_idx)
+  w5 = REACTION_PRODUCT_WEIGHTS(8, reaction_idx)
   
   ! if statements are written in a specific order to increase speed. The goal is to test first the most probable event, and 
   !! then always go to 'else' statement, not to test if we have already found our case. One, then two bodies reactions are the most 
@@ -480,11 +490,11 @@ do i=1,nb_reactions_using_species(j)
   if (reactant2_idx.eq.no_species) then
     if (reactant1_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx)
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
     endif
   
@@ -492,22 +502,22 @@ do i=1,nb_reactions_using_species(j)
   else if (reactant3_idx.eq.no_species) then
     if (reactant1_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant2_idx) * actual_gas_density
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
     endif
 
     if (reactant2_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant1_idx) * actual_gas_density
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
     endif
@@ -516,11 +526,11 @@ do i=1,nb_reactions_using_species(j)
   else
     if (reactant1_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant2_idx) * Y(reactant3_idx) * H_number_density_squared
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
       PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
@@ -528,11 +538,11 @@ do i=1,nb_reactions_using_species(j)
 
     if (reactant2_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant1_idx) * Y(reactant3_idx) * H_number_density_squared
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
       PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
@@ -540,11 +550,11 @@ do i=1,nb_reactions_using_species(j)
 
     if (reactant3_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant1_idx) * Y(reactant2_idx) * H_number_density_squared
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
       PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
@@ -592,6 +602,7 @@ real(double_precision), dimension(nb_species+1) :: YDTMP1,YDTMP2
 integer :: i
 integer :: reactant1_idx, reactant2_idx, reactant3_idx, product1_idx, product2_idx, product3_idx, product4_idx, product5_idx
 real(double_precision) :: rate
+real(double_precision) :: w1, w2, w3, w4, w5 ! per-product gain weights (compound slots 4..8); 1.0 for all chemistry
   character(2) :: c_i
 
 
@@ -621,6 +632,15 @@ do I=1,nb_reactions
   product4_idx = REACTION_COMPOUNDS_ID(7, i)
   product5_idx = REACTION_COMPOUNDS_ID(8, i)
 
+  ! Per-product gain weights. Default 1.0 (set at init) => bit-identical to the
+  ! unweighted deposit for all chemistry. Coagulation/ice reactions carry the
+  ! Podolak/Brauer redistribution weights here (loss stays unweighted).
+  w1 = REACTION_PRODUCT_WEIGHTS(4, i)
+  w2 = REACTION_PRODUCT_WEIGHTS(5, i)
+  w3 = REACTION_PRODUCT_WEIGHTS(6, i)
+  w4 = REACTION_PRODUCT_WEIGHTS(7, i)
+  w5 = REACTION_PRODUCT_WEIGHTS(8, i)
+
   ! One reactant only
   if (reactant2_idx.eq.no_species) then
     RATE = reaction_rates(I) * Y(reactant1_idx)  
@@ -636,21 +656,21 @@ do I=1,nb_reactions
 
   ! Used to compute the net rate of change in the total surface material
   IF ((REACTION_TYPE(i).ne.40).and.(REACTION_TYPE(i).ne.41)) THEN
-     YD2(product1_idx) = YD2(product1_idx) + RATE
-     YD2(product2_idx) = YD2(product2_idx) + RATE
-     YD2(product3_idx) = YD2(product3_idx) + RATE
-     YD2(product4_idx) = YD2(product4_idx) + RATE
-     YD2(product5_idx) = YD2(product5_idx) + RATE
+     YD2(product1_idx) = YD2(product1_idx) + w1 * RATE
+     YD2(product2_idx) = YD2(product2_idx) + w2 * RATE
+     YD2(product3_idx) = YD2(product3_idx) + w3 * RATE
+     YD2(product4_idx) = YD2(product4_idx) + w4 * RATE
+     YD2(product5_idx) = YD2(product5_idx) + w5 * RATE
 
      YD2(reactant1_idx) = YD2(reactant1_idx) - RATE
      YD2(reactant2_idx) = YD2(reactant2_idx) - RATE
      YD2(reactant3_idx) = YD2(reactant3_idx) - RATE
 
-     YDTMP1(product1_idx) = YDTMP1(product1_idx) + RATE
-     YDTMP1(product2_idx) = YDTMP1(product2_idx) + RATE
-     YDTMP1(product3_idx) = YDTMP1(product3_idx) + RATE
-     YDTMP1(product4_idx) = YDTMP1(product4_idx) + RATE
-     YDTMP1(product5_idx) = YDTMP1(product5_idx) + RATE
+     YDTMP1(product1_idx) = YDTMP1(product1_idx) + w1 * RATE
+     YDTMP1(product2_idx) = YDTMP1(product2_idx) + w2 * RATE
+     YDTMP1(product3_idx) = YDTMP1(product3_idx) + w3 * RATE
+     YDTMP1(product4_idx) = YDTMP1(product4_idx) + w4 * RATE
+     YDTMP1(product5_idx) = YDTMP1(product5_idx) + w5 * RATE
 
      YDTMP2(reactant1_idx) = YDTMP2(reactant1_idx) - RATE
      YDTMP2(reactant2_idx) = YDTMP2(reactant2_idx) - RATE
