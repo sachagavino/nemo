@@ -35,6 +35,17 @@ character(len=80)        :: dust_ic = 'MRN'                 !< 'MRN' or 'tabulat
 !! non-negligible value at runtime means a_max is too low. Purely diagnostic in
 !! stage 3 (no dynamics yet).
 real(double_precision)   :: dust_mass_sink = 0.d0 !< [g per H] mass accumulated above m_N
+
+! --- Coagulation (Rung 1). All default OFF so the build stays bit-identical to
+!     nmgc-2.0 unless a run explicitly asks for it in parameters.in. ------------
+logical                  :: coagulation = .false.          !< master switch (parameters.in: coagulation)
+character(len=20)        :: coagulation_kernel = 'constant' !< 'constant' (Rung 1) | 'brownian' (Rung 1b)
+real(double_precision)   :: constant_kernel_k0 = 0.d0       !< [cm^3/s] constant kernel K0 for validation
+integer                  :: nb_chemistry_reactions = 0      !< reactions before coagulation is appended
+integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions
+integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
+integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
+integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
 integer                  :: stdo, ffli
 ! real(double_precision), dimension(1:):: grain_radii
 ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a
@@ -664,6 +675,14 @@ close(902)
 
 nb_species = nb_species_for_gas + nb_species_for_grain ! The total number of species, sum of species in gas and grain
 nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number of reactions, sum of species in gas and grain
+
+! Coagulation reactions are appended as a contiguous terminal block. Their count
+! is computed in dust_coagulation_count() (called from init_gasgrain right after
+! the grid is built, BEFORE this routine) and merely added here, so the reaction
+! arrays are allocated large enough. nb_coagulation_reactions is 0 when
+! coagulation is off, keeping nb_reactions -- and the whole build -- unchanged.
+nb_chemistry_reactions = nb_reactions
+nb_reactions = nb_reactions + nb_coagulation_reactions
 
 ! write(*,*)"nb_species_for_gas",nb_species_for_gas,"nb_gas_phase_reactions",nb_gas_phase_reactions
 ! write(*,*)"nb_species_for_grain",nb_species_for_grain,"nb_surface_reactions",nb_surface_reactions

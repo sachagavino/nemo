@@ -36,6 +36,7 @@ contains
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
 subroutine init_gasgrain()
 use global_variables
+use dust_evolution
 
 implicit none
 
@@ -51,6 +52,10 @@ call read_parameters_in()           ! Read simulation parameters. Need to read i
 call get_grain_radii()              ! Read grain radius in cm
 call get_YGRAIN()                   ! initialize character variables YGRAIN and YGRAIN_MINUS
 call read_element_in()              ! Read list of prime elements, including their atomic mass (in AMU)
+! Coagulation reactions are appended to the network as a terminal block. Count
+! them now -- after the grid (mass_grid) exists, BEFORE get_array_sizes sizes the
+! reaction arrays. Off by default => nb_coagulation_reactions stays 0.
+if (coagulation) call dust_coagulation_count()
 call get_array_sizes()              ! Get various size needed for allocatable arrays
 
 ! Physical structure of the 0D box.
@@ -85,6 +90,13 @@ call read_species()
 ! Read list of reactions for gas and grains
 call read_reactions()
 
+! Append the coagulation pseudo-reactions at the NAME level (reactant/product
+! grain-bin names, type, redistribution weights). MUST precede index_datas -- its
+! type scan needs REACTION_TYPE -- and set_chemical_reactants/init_relevant_reactions,
+! which resolve the names to IDs the Jacobian columns are built from. Rates are set
+! later (after init_reaction_rates, which would otherwise clobber them). Off by default.
+if (coagulation) call dust_coagulation_inject_static()
+
 ! Precompute the per-species / per-reaction grain-rank, phase and ice-species
 ! index maps so the RHS need not re-parse species names on every call.
 call build_index_maps()
@@ -111,6 +123,10 @@ call get_gas_surface_species()
 
 ! Initialization of elemental/chemical quantities
 call index_datas()
+
+! Coagulation kernel coefficients. MUST follow index_datas -> init_reaction_rates
+! (which sets chemistry rates and would otherwise leave/overwrite the coag slots).
+if (coagulation) call dust_coagulation_set_rates()
 
 ! Calculate the initial abundances for all elements that compose the species
 ! Here it is assumed that all the cells in 1D have the same elemental abundances
@@ -1476,6 +1492,11 @@ if (IS_TEST.eq.1) then
   ! CHECK that reactions are equilibrated (for prime elements)
   do reaction=1,nb_reactions
 !   write(*,*) reaction
+    ! Coagulation reactions conserve MASS via the per-product redistribution
+    ! weights, which this integer atom-count balance cannot see (2 grains -> 1
+    ! grain, split across two bins). Their conservation is validated by the
+    ! mass-conservation diagnostic (gate a), not here.
+    if (REACTION_TYPE(reaction).eq.COAGULATION_TYPE) cycle
     do element=1,NB_PRIME_ELEMENTS
       left_sum = 0
       do compound=1,MAX_REACTANTS
@@ -1505,6 +1526,7 @@ if (IS_TEST.eq.1) then
 
   ! CHECK that reactions are equilibrated (for charge)
   do reaction=1,nb_reactions
+    if (REACTION_TYPE(reaction).eq.COAGULATION_TYPE) cycle   ! neutral grain bins; see note above
     left_sum = 0
     do compound=1,MAX_REACTANTS
       tmp_name = REACTION_COMPOUNDS_NAMES(compound,reaction)

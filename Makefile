@@ -43,6 +43,7 @@ MODULES := \
   $(SRCDIR)/dust/dust_grid.f90 \
   $(SRCDIR)/input_output.f90 \
   $(SRCDIR)/ode_solver.f90 \
+  $(SRCDIR)/dust/dustevolution.f90 \
   $(SRCDIR)/gasgrain.f90 \
   $(SRCDIR)/outputs.f90
 

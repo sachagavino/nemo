@@ -869,6 +869,12 @@ if (isDefined) then
         read(value, '(e12.6)') dust_power_law_index
       case('dust_grid_source')
         read(value, *) dust_grid_source
+      case('coagulation')                         ! Rung 1 master switch (default off)
+        read(value, '(l1)') coagulation
+      case('coagulation_kernel')                  ! 'constant' (Rung 1) | 'brownian' (Rung 1b)
+        read(value, *) coagulation_kernel
+      case('constant_kernel_k0')                  ! [cm^3/s] constant kernel for the analytic gate
+        read(value, '(e12.6)') constant_kernel_k0
       case('dust_ic')
         read(value, *) dust_ic
       case('sparsity')
