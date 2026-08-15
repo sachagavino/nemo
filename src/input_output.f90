@@ -161,6 +161,22 @@ integer, intent(in) :: index !<[in] The reference index of the current output
 integer :: k
 real(double_precision) :: n_k, dust_mass_per_h, grain_number_per_h
 real(double_precision), dimension(nb_grains) :: nk_all
+real(double_precision) :: dropped_frac
+real(double_precision), parameter :: COAG_DROPPED_WARN = 1.d-3 !< warn once the dropped fraction exceeds 0.1%
+
+! Fraction of the coagulation collision rate dropped by the Rung 1 top-bin policy.
+! Computed in the main loop (dust_coagulation_flux_diag) into module globals; ~0
+! while the top bins are unpopulated, which is the condition for the overflow skip
+! to be lossless and the analytic gate to hold.
+dropped_frac = 0.d0
+if (coagulation .and. coag_total_flux > 0.d0) dropped_frac = coag_dropped_flux / coag_total_flux
+if (coagulation .and. dropped_frac > COAG_DROPPED_WARN) then
+  write(Error_unit,'(a,es9.2e2,a,es10.3e2,a)') &
+    ' Warning (coagulation): dropped-flux fraction = ', dropped_frac, &
+    ' at t = ', current_time/YEAR, ' yr -- mass is reaching the top bins;'
+  write(Error_unit,'(a)') &
+    '   the top-bin overflow skip is no longer lossless and the analytic gate is invalid. Use a larger grid.'
+endif
 
 ! total grain number per bin = neutral + negative charge state (per H)
 dust_mass_per_h    = 0.d0
@@ -179,16 +195,16 @@ if (index == 1) then
   write(36,'(a)') '! n_k is the total grain number per bin (GRAIN0_k + GRAIN0_k-), per H.'
   write(36,'(a)') '! sigma(a) = m*dn/dlog a is a reduction (scripts/dust_distribution.py), not stored here.'
   write(36,'(a)') '! time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H]  &
-                  &dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]'
+                  &dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]  coag_dropped_flux_frac'
 else
   open(36, file='dust_distribution.out', status='old', position='append')
 end if
 
 do k=1,nb_grains
   write(36,'(es20.10e3,2x,i4,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,&
-            &es22.14e3,2x,es22.14e3,2x,es22.14e3)') &
+            &es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3)') &
     current_time/YEAR, k, grain_radii(k), mass_grid(k), nk_all(k), mass_grid(k)*nk_all(k), &
-    dust_mass_per_h, grain_number_per_h, dust_mass_sink
+    dust_mass_per_h, grain_number_per_h, dust_mass_sink, dropped_frac
 enddo
 
 close(36)

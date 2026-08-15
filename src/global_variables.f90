@@ -45,6 +45,8 @@ integer                  :: nb_chemistry_reactions = 0      !< reactions before 
 integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions
 integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
 integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
+real(double_precision)   :: coag_dropped_flux = 0.d0 !< runtime coagulation collision rate dropped by the top-bin policy
+real(double_precision)   :: coag_total_flux   = 0.d0 !< runtime total coagulation collision rate (all pairs)
 integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
 integer, parameter       :: COAG_REACTION_ID_BASE = 900000  !< high base for coagulation REACTION_IDs (clear of chemistry file IDs)
 integer                  :: stdo, ffli

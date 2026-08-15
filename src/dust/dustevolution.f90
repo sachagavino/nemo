@@ -213,7 +213,7 @@ end subroutine dust_coagulation_inject_static
 subroutine dust_coagulation_set_rates()
   implicit none
   integer :: i, j, k1, k2, slot, ns
-  real(double_precision) :: w1, w2, kernel
+  real(double_precision) :: w1, w2
   logical :: is_overflow
 
   if (constant_kernel_k0 <= 0.d0) then
@@ -228,39 +228,67 @@ subroutine dust_coagulation_set_rates()
       if (is_overflow) cycle
       ns = ns + 1
       slot = nb_chemistry_reactions + ns
-
-      kernel = constant_kernel_k0                 ! Rung 1 validation kernel
-      if (i == j) kernel = 0.5d0 * kernel         ! unordered self-pair counted once
-      reaction_rates(slot) = kernel
+      reaction_rates(slot) = coag_kernel(i, j)
     enddo
   enddo
   return
 end subroutine dust_coagulation_set_rates
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-!> @brief Runtime diagnostic: total coagulation flux dropped by the Rung 1
-!! overflow policy, sum over skipped pairs of K_ij n_i n_j. Must stay ~0 over the
-!! validation window; a non-negligible value means the grid/K0 are misconfigured
-!! and the analytic gate is no longer valid. (Kernel wiring lands with Rung 1b;
-!! the constant kernel is used here as the placeholder scale.)
+!> @brief Rate coefficient for the unordered bin pair (i,j), including the 1/2
+!! factor on self-pairs (each unordered pair counted once). SINGLE SOURCE OF TRUTH
+!! for the kernel: dust_coagulation_set_rates writes it onto reaction_rates and the
+!! dropped-flux diagnostic evaluates it on the overflow pairs, so the guard tracks
+!! whatever kernel the reactions actually use. Rung 1: constant K0. Rung 1b adds the
+!! Brownian branch here (selected by coagulation_kernel); nothing else changes.
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function dust_coagulation_dropped_flux() result(flux)
+function coag_kernel(i, j) result(kern)
   implicit none
-  real(double_precision) :: flux
-  integer :: p, i, j
-  real(double_precision) :: ni, nj, kernel
+  integer, intent(in) :: i, j
+  real(double_precision) :: kern
 
-  flux = 0.d0
-  if (coag_overflow_pairs_skipped <= 0) return
-  do p = 1, coag_overflow_pairs_skipped
-    i = coag_overflow_i(p); j = coag_overflow_j(p)
-    ni = abundances(INDGRAIN(i)); nj = abundances(INDGRAIN(j))
-    kernel = constant_kernel_k0
-    if (i == j) kernel = 0.5d0 * kernel
-    flux = flux + kernel * ni * nj
+  select case (trim(coagulation_kernel))
+  case ('constant')
+    kern = constant_kernel_k0
+  case default
+    write(error_unit,'(3a)') 'Error (coagulation): unknown coagulation_kernel "', &
+      trim(coagulation_kernel), '" (Rung 1 supports: constant).'
+    call exit(31)
+  end select
+  if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once
+  return
+end function coag_kernel
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Runtime overflow guard. Returns the coagulation collision rate that the
+!! Rung 1 top-bin policy (c) DROPS, sum over overflow pairs of kernel(i,j) n_i n_j,
+!! and the TOTAL collision rate over all pairs. The caller reports dropped/total,
+!! which must stay ~0 over a valid validation window; a non-negligible value means
+!! mass has reached the top bins and the boundary-free analytic solution no longer
+!! holds (and, once Brownian lands, that the faster kernel is stressing the grid).
+!! Uses the neutral bin population, the species the coagulation reactions act on.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine dust_coagulation_flux_diag(dropped, total)
+  implicit none
+  real(double_precision), intent(out) :: dropped, total
+  integer :: i, j, k1, k2
+  real(double_precision) :: w1, w2, ni, nj, f
+  logical :: is_overflow
+
+  dropped = 0.d0
+  total   = 0.d0
+  do i = 1, nb_grains
+    ni = abundances(INDGRAIN(i))
+    do j = i, nb_grains
+      nj = abundances(INDGRAIN(j))
+      f  = coag_kernel(i, j) * ni * nj        ! collision-rate contribution of this pair
+      total = total + f
+      call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+      if (is_overflow) dropped = dropped + f
+    enddo
   enddo
   return
-end function dust_coagulation_dropped_flux
+end subroutine dust_coagulation_flux_diag
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 ! Guards.

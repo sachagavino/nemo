@@ -46,6 +46,7 @@ PROGRAM nmgc
   use global_variables
   use iso_fortran_env
   use shielding
+  use dust_evolution
   use utilities
   use gasgrain
   use outputs
@@ -250,6 +251,10 @@ PROGRAM nmgc
 
       call write_current_rates(index=output_idx)
       call write_current_output(index=output_idx)
+      ! Overflow guard: the coagulation collision rate the Rung 1 top-bin policy
+      ! drops (and the total), recorded per output by write_current_dust. Must stay
+      ! ~0; a growing fraction means mass reached the top bins.
+      if (coagulation) call dust_coagulation_flux_diag(coag_dropped_flux, coag_total_flux)
       call write_current_dust(index=output_idx)
 
       first_step_done = .true.
