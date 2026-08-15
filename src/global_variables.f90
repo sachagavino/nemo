@@ -46,6 +46,7 @@ integer                  :: nb_coagulation_reactions = 0    !< appended coagulat
 integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
 integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
 integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
+integer, parameter       :: COAG_REACTION_ID_BASE = 900000  !< high base for coagulation REACTION_IDs (clear of chemistry file IDs)
 integer                  :: stdo, ffli
 ! real(double_precision), dimension(1:):: grain_radii
 ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a

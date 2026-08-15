@@ -148,26 +148,34 @@ PROGRAM nmgc
         ENDIF
       ENDDO
 
-      ! Column densities of the self-shielded species, from Av
-      NH    = actual_av/AV_NH_ratio * abundances(indH)
-      NH2   = actual_av/AV_NH_ratio * abundances(indH2)
-      NN2   = actual_av/AV_NH_ratio * abundances(indN2)
-      NCO   = actual_av/AV_NH_ratio * abundances(indCO)
-      NH2O  = actual_av/AV_NH_ratio * abundances(indH2O)
-      NCH   = actual_av/AV_NH_ratio * abundances(indCH)
-      NCH3  = actual_av/AV_NH_ratio * abundances(indCH3)
-      NH2CO = actual_av/AV_NH_ratio * abundances(indH2CO)
-      NCO2  = actual_av/AV_NH_ratio * abundances(indCO2)
-      NN2O  = actual_av/AV_NH_ratio * abundances(indN2O)
-      NCH4  = actual_av/AV_NH_ratio * abundances(indCH4)
-      NOH   = actual_av/AV_NH_ratio * abundances(indOH)
-      NHCO  = actual_av/AV_NH_ratio * abundances(indHCO)
-      NCN   = actual_av/AV_NH_ratio * abundances(indCN)
-      NHCN  = actual_av/AV_NH_ratio * abundances(indHCN)
-      NHNC  = actual_av/AV_NH_ratio * abundances(indHNC)
-      NNH   = actual_av/AV_NH_ratio * abundances(indNH)
-      NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
-      NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
+      ! Column densities of the self-shielded species, from Av. Each is only used
+      ! by the corresponding H2/CO/N2 self-shielding rate code, which is absent when
+      ! those reactions are not in the network (e.g. the dust-only coagulation
+      ! fixture). Guard on a resolved index so a species missing from a reduced
+      ! network does not index abundances(0); byte-identical for any full network,
+      ! where every index is positive.
+      NH=0.d0; NH2=0.d0; NN2=0.d0; NCO=0.d0; NH2O=0.d0; NCH=0.d0; NCH3=0.d0
+      NH2CO=0.d0; NCO2=0.d0; NN2O=0.d0; NCH4=0.d0; NOH=0.d0; NHCO=0.d0; NCN=0.d0
+      NHCN=0.d0; NHNC=0.d0; NNH=0.d0; NNH2=0.d0; NNH3=0.d0
+      if (indH   >0) NH    = actual_av/AV_NH_ratio * abundances(indH)
+      if (indH2  >0) NH2   = actual_av/AV_NH_ratio * abundances(indH2)
+      if (indN2  >0) NN2   = actual_av/AV_NH_ratio * abundances(indN2)
+      if (indCO  >0) NCO   = actual_av/AV_NH_ratio * abundances(indCO)
+      if (indH2O >0) NH2O  = actual_av/AV_NH_ratio * abundances(indH2O)
+      if (indCH  >0) NCH   = actual_av/AV_NH_ratio * abundances(indCH)
+      if (indCH3 >0) NCH3  = actual_av/AV_NH_ratio * abundances(indCH3)
+      if (indH2CO>0) NH2CO = actual_av/AV_NH_ratio * abundances(indH2CO)
+      if (indCO2 >0) NCO2  = actual_av/AV_NH_ratio * abundances(indCO2)
+      if (indN2O >0) NN2O  = actual_av/AV_NH_ratio * abundances(indN2O)
+      if (indCH4 >0) NCH4  = actual_av/AV_NH_ratio * abundances(indCH4)
+      if (indOH  >0) NOH   = actual_av/AV_NH_ratio * abundances(indOH)
+      if (indHCO >0) NHCO  = actual_av/AV_NH_ratio * abundances(indHCO)
+      if (indCN  >0) NCN   = actual_av/AV_NH_ratio * abundances(indCN)
+      if (indHCN >0) NHCN  = actual_av/AV_NH_ratio * abundances(indHCN)
+      if (indHNC >0) NHNC  = actual_av/AV_NH_ratio * abundances(indHNC)
+      if (indNH  >0) NNH   = actual_av/AV_NH_ratio * abundances(indNH)
+      if (indNH2 >0) NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
+      if (indNH3 >0) NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
 
       call integrate_chemical_scheme(delta_t=output_timestep, temp_abundances=abundances(1:nb_species), & ! Inputs
       i_tol=itol, a_tol=atol, i_task=itask, i_opt=iopt, m_f=mf, & ! Inputs

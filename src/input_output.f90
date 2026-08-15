@@ -680,7 +680,11 @@ endif
 
 nb_columns_grain = get_nb_columns(filename_grain)
 
-if ((nb_columns_grain - 2).ne.NB_PRIME_ELEMENTS) then
+! An ice-free / dust-only network (e.g. the Rung 1 coagulation fixture) has no
+! surface species at all, so grain_species.in is legitimately empty and carries
+! no column count. Only cross-check the prime-element width when it has content;
+! this leaves every non-empty (stock) network byte-identical.
+if ((nb_species_for_grain > 0) .and. ((nb_columns_grain - 2).ne.NB_PRIME_ELEMENTS)) then
   write (Error_unit,'(a,i0,a,a,a,i0,a)') 'The number of prime elements is different in "element.in" (', NB_PRIME_ELEMENTS, &
   ') and "', trim(filename_grain), '" (', nb_columns_grain-2, ') .'
   call exit(6)
@@ -742,6 +746,7 @@ character(len=80) :: line
 character(len=1), parameter :: comment_character = '!' !< character that will indicate that the rest of the line is a comment
 integer :: comment_position !< the index of the comment character on the line. if zero, there is none on the current string
 integer :: error !< to store the state of a read instruction
+integer :: coag_flag_tmp !< 0/1 switch buffer for the coagulation flag
 
 logical :: isParameter, isDefined
 character(len=80) :: identificator, value
@@ -869,8 +874,9 @@ if (isDefined) then
         read(value, '(e12.6)') dust_power_law_index
       case('dust_grid_source')
         read(value, *) dust_grid_source
-      case('coagulation')                         ! Rung 1 master switch (default off)
-        read(value, '(l1)') coagulation
+      case('coagulation')                         ! Rung 1 master switch (0/1, like the other switches)
+        read(value, '(i2)') coag_flag_tmp
+        coagulation = (coag_flag_tmp /= 0)
       case('coagulation_kernel')                  ! 'constant' (Rung 1) | 'brownian' (Rung 1b)
         read(value, *) coagulation_kernel
       case('constant_kernel_k0')                  ! [cm^3/s] constant kernel for the analytic gate
@@ -1441,10 +1447,13 @@ enddo
 !  write(*,*)"--------------------------------------------------------------------------------------"
 !    pause
 
-! Reorder reaction file entries with ITYPE
+! Reorder reaction file entries with ITYPE. Only the chemistry reactions live in
+! the unordered (UO) arrays; the coagulation block is appended pre-sorted after
+! read_reactions, so bound this to nb_chemistry_reactions (== nb_reactions when
+! coagulation is off, leaving the stock reorder byte-identical).
 jk=1
 do i=0,MAX_NUMBER_REACTION_TYPE
-  do j=1,nb_reactions
+  do j=1,nb_chemistry_reactions
     if (itypeuo(j).eq.i) then
       REACTION_COMPOUNDS_NAMES(:,jk)=SYMBOLUO(:,j)     
       RATE_A(jk)=AUO(j)
@@ -1489,9 +1498,9 @@ do i=1,nb_reactions
 !  endif
 enddo  
 !  pause
-if (jk.ne.nb_reactions+1) then
+if (jk.ne.nb_chemistry_reactions+1) then
   write(Error_unit,*) 'Some reaction was not found by the reorder process'
-  write(Error_unit,*) jk,'=/',nb_reactions+1 
+  write(Error_unit,*) jk,'=/',nb_chemistry_reactions+1 
   call exit(4)
 endif
 

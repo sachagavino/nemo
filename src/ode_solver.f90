@@ -1344,7 +1344,11 @@ abCO(1:nb_grains) = 0.d0
 !   do J=1,nb_species
 !       ACC_RATES_PREFACTOR(J)=COND*STICK_SPEC(J)/SQRT(SPECIES_MASS(J))
 !   ENDDO
-  do j=1,nb_reactions
+  ! Accretion prefactors are a gas-phase-accretion quantity; coagulation reactions
+  ! never use them (their kernel is on reaction_rates), and their reactant_1_idx is
+  ! deliberately unset, so restrict this to the chemistry block (== nb_reactions when
+  ! coagulation is off).
+  do j=1,nb_chemistry_reactions
     ACC_RATES_PREFACTOR(J) = COND(j)*STICK_SPEC(reactant_1_idx(J))/SQRT(SPECIES_MASS(reactant_1_idx(J)))
 !   write(298,*)J,ACC_RATES_PREFACTOR(J),STICK_SPEC(reactant_1_idx(J)),reactant_1_idx(J),species_name(reactant_1_idx(J))
   enddo  

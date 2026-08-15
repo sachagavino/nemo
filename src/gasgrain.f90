@@ -475,6 +475,19 @@ do I=0,MAX_NUMBER_REACTION_TYPE-1
   enddo
 enddo
 
+! In a chemistry-free (coagulation-only) network every gas/grain reaction type is
+! absent, and the scan leaves it (start,stop)=(0,0). The many rate loops of the
+! form `do J=type_id_start(T),type_id_stop(T)` would then run once at J=0 and index
+! the reaction arrays out of bounds. Turn each absent range into the empty do-loop
+! range [1,0] so those loops iterate zero times. Guarded by `coagulation`, so the
+! default build is byte-identical; the tiling validator below keys on stop==0 and
+! treats [1,0] and [0,0] identically as "type not defined".
+if (coagulation) then
+  do I=0,MAX_NUMBER_REACTION_TYPE-1
+    if (type_id_stop(I).eq.0) type_id_start(I)=1
+  enddo
+endif
+
 ! Find the index of CO, H2, H, He and grain0 PLUS H2O and a few other contained in folder cross-sections.
 do i=1,nb_species
   if (species_name(i).eq.YH2)   INDH2=i
@@ -766,7 +779,11 @@ end subroutine index_datas
     ! For each reaction, we search if there is an activation energy defined for it.
     ! the "all()" function can compare array element by element to ensure that everything is equal one by one. usefull to find 
     ! if we have the good reaction
-    do I=1,nb_reactions
+    ! init_reaction_rates computes chemistry rate coefficients only; the
+    ! coagulation block (appended at the end) gets its kernel from
+    ! dust_coagulation_set_rates. Bound every reaction sweep to
+    ! nb_chemistry_reactions -- identical to nb_reactions when coagulation is off.
+    do I=1,nb_chemistry_reactions
       ACTIVATION_ENERGY(I)=0.d0
       
       do J=1,NEA
@@ -815,7 +832,7 @@ end subroutine index_datas
     enddo
 ! pause
     ! === Cycle all reactions
-    do J=1,nb_reactions
+    do J=1,nb_chemistry_reactions
 
       ! ------ Initialise all branching_ratio rate factors, and get species 1 & 2
       branching_ratio(J)=1.0d0
@@ -831,7 +848,7 @@ end subroutine index_datas
         NPATH=0
 
         ! ------ Check for branching
-        do K=1,nb_reactions
+        do K=1,nb_chemistry_reactions
            if(REACTION_TYPE(K).EQ.REACTION_TYPE(J)) then
              if (((REACTION_COMPOUNDS_NAMES(1,J).EQ.REACTION_COMPOUNDS_NAMES(1,K)).AND.&
                   (REACTION_COMPOUNDS_NAMES(2,J).EQ.REACTION_COMPOUNDS_NAMES(2,K))).OR.&
@@ -1099,7 +1116,7 @@ end subroutine index_datas
 
       ! ------ Calculate evaporation fraction
       NEVAP=0
-      do K=1,nb_reactions
+      do K=1,nb_chemistry_reactions
         if ((REACTION_COMPOUNDS_NAMES(4,J)(:1).EQ.'J').AND.(RATE_A(K).NE.0.d0)) then
           if ((REACTION_COMPOUNDS_NAMES(1,J).EQ.REACTION_COMPOUNDS_NAMES(1,K)).AND.&
           (REACTION_COMPOUNDS_NAMES(2,J).EQ.REACTION_COMPOUNDS_NAMES(2,K)).AND.&
@@ -1745,8 +1762,9 @@ if (IS_TEST.eq.1) then
   
   ! Check reactions id indexes (if they overlap, or miss some indexes)
   do i=0,MAX_NUMBER_REACTION_TYPE-1
-    if ((type_id_start(i).eq.0).and.(type_id_stop(i).eq.0)) then
-      cycle ! Reaction type not defined
+    if (type_id_stop(i).eq.0) then
+      cycle ! Reaction type not defined (start,stop)=(0,0) or, in a coagulation-only
+            ! network, the empty do-loop range (1,0); both mean "no reaction of this type".
     endif
     
     if ((type_id_start(i).gt.type_id_stop(i))) then

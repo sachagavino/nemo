@@ -184,6 +184,10 @@ subroutine dust_coagulation_inject_static()
       REACTION_COMPOUNDS_NAMES(5, slot) = YGRAIN(k2)    ! product 2 (upper bin)
 
       REACTION_TYPE(slot) = COAGULATION_TYPE
+      ! Unique reaction ID (high base, clear of chemistry file IDs) so the
+      ! duplicate-ID preliminary test does not treat distinct coagulation pairs
+      ! as clashing entries of one reaction.
+      REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
 
       ! Podolak/Brauer split on the product weights; loss stays unweighted.
       REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
