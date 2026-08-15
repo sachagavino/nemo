@@ -186,6 +186,28 @@ subroutine dust_ic_mrn()
 end subroutine dust_ic_mrn
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Monodisperse initial dust distribution: all grains in bin 1. This is
+!! the initial condition for the constant-kernel analytic coagulation gate, whose
+!! closed form N(t) = N0 / (1 + K0 N0 t / 2) assumes a single initial size.
+!! Empty bins get a huge GTODN so their abundance 1/GTODN is ~0.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine dust_ic_monodisperse()
+
+  implicit none
+  integer :: k
+  real(double_precision) :: n1
+
+  ! sum_k n_k m_k = initial_dtg_mass_ratio * AMU (per H), all mass in bin 1
+  n1 = initial_dtg_mass_ratio * AMU / mass_grid(1)
+  GTODN_0D_temp(1) = 1.d0 / n1
+  do k=2,nb_grains
+    GTODN_0D_temp(k) = 1.d300   ! empty bin: abundance = 1/GTODN ~ 0
+  enddo
+
+  return
+end subroutine dust_ic_monodisperse
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 ! Small geometry helpers. m = (4/3) pi rho a^3.
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 pure function mass_of_radius(a) result(m)

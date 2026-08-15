@@ -408,7 +408,11 @@ use global_variables
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*   Dust IC (populates grid)*"
   write(10,'(a)') "!*****************************"
-  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN or tabulated'
+  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN, monodisperse or tabulated'
+  write(10,'(a)') "! Coagulation (Rung 1): grain coagulation via the Smoluchowski kernel."
+  write(10,'(a,i0,a)') 'coagulation = ', merge(1,0,coagulation), ' ! 0/1 master switch'
+  write(10,'(a,a,a)') 'coagulation_kernel = ', trim(coagulation_kernel), ' ! constant (Rung 1) or brownian'
+  write(10,'(a,es10.3e2,a)') 'constant_kernel_k0 = ', constant_kernel_k0, ' ! [cm^3/s] constant kernel for the analytic gate'
   write(10,'(a,es10.3e2,a)') 'dust_power_law_index = ', dust_power_law_index, &
     ' ! MRN exponent dn/da ~ a^index (-3.5 = MRN), normalised by initial_dtg_mass_ratio'
   write(10,'(a)') ""
@@ -581,6 +585,8 @@ endif
 ! --- Initial distribution (populates the grid, does not define it) -------
 if (dust_ic.eq.'MRN') then
   call dust_ic_mrn()                   ! fills GTODN_0D_temp = 1/n_k
+else if (dust_ic.eq.'monodisperse') then
+  call dust_ic_monodisperse()          ! all grains in bin 1 (analytic coagulation gate)
 else if (dust_ic.eq.'tabulated') then
   if (dust_grid_source.ne.'tabulated') then
     write(Error_unit,*) 'Error: dust_ic = tabulated currently requires &
@@ -589,7 +595,7 @@ else if (dust_ic.eq.'tabulated') then
   endif
   ! GTODN_0D_temp already holds the tabulated 1/abundance column.
 else
-  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN or tabulated.'
+  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN, monodisperse or tabulated.'
   call exit(31)
 endif
 
