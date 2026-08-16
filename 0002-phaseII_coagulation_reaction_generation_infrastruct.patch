@@ -1,0 +1,491 @@
+From 1fe51f13337d0754777f1bba73625df6c0ccd0c1 Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Fri, 14 Aug 2026 18:07:15 +0000
+Subject: [PATCH 1/4] Phase II: coagulation reaction-generation infrastructure
+ (default-off)
+
+Rung 1 (pure grain coagulation) encoded as bilinear pseudo-reactions that
+flow through the existing chemistry RHS/Jacobian, per the locked design:
+one reaction per unordered bin pair (i,j), bin_i+bin_j -> eps*bin_k +
+(1-eps)*bin_{k+1}; kernel (with the 1/2 self-pair factor) on reaction_rates,
+Podolak/Brauer split on the per-product weight field, loss unweighted. Mass
+is exact by construction (eps*m_k + (1-eps)*m_{k+1} = m_i+m_j).
+
+New: src/dust/dustevolution.f90 (module dust_evolution)
+  - coag_pair_target: single source of truth for pair -> (bins,weights);
+    top-bin OVERFLOW (m_i+m_j > m_N) handled as Rung 1 policy (c) -- the
+    reaction is simply not generated (mass-exact, keeps the analytic gate
+    valid). Skipped pairs are a LOUD deferral: recorded at init, counted, and
+    exposed via dust_coagulation_dropped_flux() (sum K_ij n_i n_j over skipped
+    pairs) which must read ~0 over the validation window.
+  - dust_coagulation_count / _inject_static / _set_rates: count before
+    get_array_sizes; inject at the NAME level after read_reactions (resolved to
+    IDs by set_chemical_reactants, so no INDGRAIN plumbing) before index_datas'
+    type scan; set the constant kernel after init_reaction_rates.
+  - guards: fatal error on an ice-bearing network (J/K species) since
+    coagulation does not transport ice until Rung 2; fatal if COAGULATION_TYPE
+    (50) collides with a chemistry type.
+
+Wiring (all guarded by `coagulation`, default .false.):
+  - global_variables: coagulation flag, constant_kernel_k0, kernel selector,
+    reaction counters, skipped-pair store, COAGULATION_TYPE=50; get_array_sizes
+    appends nb_coagulation_reactions (0 when off).
+  - input_output: keyword-parser cases coagulation / coagulation_kernel /
+    constant_kernel_k0 (absent keywords default safely).
+  - gasgrain init_gasgrain: three guarded calls at the required points.
+  - preliminary_tests: exempt COAGULATION_TYPE from element/charge integer
+    balance (coag conserves mass via weights, validated by gate a, not here).
+  - Makefile: dustevolution.f90 between ode_solver and gasgrain.
+
+Verification: default build (-O2 and -O0) compiles+links clean; the full-init
+jac_weight_check smoke test passes IDENTICALLY to the parent commit (13450
+entries, worst reldiff 1.8006e-3, 0 weight bugs), proving the entire network
+build + RHS + Jacobian are bit-unchanged with coagulation off. Combined with
+the default-off guards (nothing new runs; nb_reactions unchanged) this
+establishes byte-identity of the default path. The coagulation-ON path is NOT
+yet validated -- that needs the dust-only fixture (next), together with the
+mass-conservation gate (a) and the M0-decay analytic gate (b1).
+---
+ Makefile                   |   1 +
+ src/dust/dustevolution.f90 | 292 +++++++++++++++++++++++++++++++++++++
+ src/gasgrain.f90           |  22 +++
+ src/global_variables.f90   |  19 +++
+ src/input_output.f90       |   6 +
+ 5 files changed, 340 insertions(+)
+ create mode 100644 src/dust/dustevolution.f90
+
+diff --git a/Makefile b/Makefile
+index f29913a..dfbaf46 100644
+--- a/Makefile
++++ b/Makefile
+@@ -43,6 +43,7 @@ MODULES := \
+   $(SRCDIR)/dust/dust_grid.f90 \
+   $(SRCDIR)/input_output.f90 \
+   $(SRCDIR)/ode_solver.f90 \
++  $(SRCDIR)/dust/dustevolution.f90 \
+   $(SRCDIR)/gasgrain.f90 \
+   $(SRCDIR)/outputs.f90
+ 
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+new file mode 100644
+index 0000000..17cbec4
+--- /dev/null
++++ b/src/dust/dustevolution.f90
+@@ -0,0 +1,292 @@
++!******************************************************************************
++! MODULE: dust_evolution
++!******************************************************************************
++!
++! DESCRIPTION:
++!> @brief Rung 1: pure grain coagulation, encoded as bilinear pseudo-reactions
++!!        that flow through the existing chemistry RHS/Jacobian machinery.
++!!
++!! ENCODING (design-thread-blessed). One pseudo-reaction per UNORDERED bin pair
++!! (i,j), i<=j:
++!!     bin_i + bin_j  ->  eps * bin_k  +  (1-eps) * bin_{k+1}
++!! carried entirely by existing arrays -- no new RHS branch:
++!!   * reactant slots 1,2 = YGRAIN(i), YGRAIN(j); slot 3 blank => no_species,
++!!     so the RHS reads it as a two-body reaction (RATE = k * Y_i * Y_j * n_H).
++!!   * the KERNEL K_ij rides on reaction_rates; the diagonal factor 1/2 (each
++!!     unordered self-pair counted once) rides there too: reaction_rates =
++!!     K_ii/2 for i==j, K_ij for i/=j. This reproduces Smoluchowski exactly:
++!!       dY_i/dt = -K_ij Y_i Y_j n_H  (off-diag),  -K_ii Y_i^2 n_H  (i==j),
++!!     because the RHS subtracts RATE once per reactant slot (twice when i==j).
++!!   * the Podolak/Brauer REDISTRIBUTION (eps, 1-eps) rides on the per-product
++!!     WEIGHT field (slots 4,5). Loss is never weighted. eps is fixed at init.
++!!     Mass is conserved to machine precision because
++!!       eps*m_k + (1-eps)*m_{k+1} = m_i + m_j   (linear interpolation in mass).
++!!
++!! TOP-BIN OVERFLOW -- Rung 1 policy (c), a LOUD guarded deferral, NOT a silent
++!! omission. If m_i + m_j exceeds the top representative mass m_N, the product
++!! has no bin. The long-term form (a) routes it to dust_mass_sink; Rung 1 instead
++!! DOES NOT GENERATE the reaction at all -- the collision simply does not occur,
++!! which is mass-exact (no leak) and, crucially, keeps the constant-kernel
++!! analytic gate valid: the closed-form Smoluchowski solution has no upper
++!! boundary, so any overflow would invalidate the comparison. This is only sound
++!! while the top bins stay unpopulated; dust_coagulation_dropped_flux() (wired
++!! with the diagnostics) reports the coagulation flux being dropped and must read
++!! ~0 over the validation window, so a grid/K0 misconfiguration surfaces loudly
++!! instead of hiding. The skipped pairs are recorded at init for that check.
++!!
++!! ICE GUARD. Coagulation moves only the refractory grain-core pseudo-species.
++!! Ice (J surface / K mantle species) is not transported by coagulation until
++!! Rung 2; running coagulation on an ice-bearing network would orphan the ice
++!! (ice whose host grains have left the bin) -- physically incoherent. We forbid
++!! it outright: coagulation on a network containing any J/K species is a fatal
++!! error. Rung 1 runs on the ice-free fixture and sidesteps this entirely.
++!
++!******************************************************************************
++
++module dust_evolution
++
++use iso_fortran_env
++use numerical_types
++use global_variables
++
++implicit none
++
++! Tolerances for the geometric mass grid (mass_ratio ~ 2, well-separated bins).
++real(double_precision), parameter :: COAG_MASS_TOL = 1.d-9
++
++contains
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Bracket the collision product m_i+m_j on the (geometric) mass grid.
++!! Single source of truth for the pair -> (bins, weights) map: the count pass
++!! and both fill passes call this, so they cannot disagree on which pairs exist.
++!!   is_overflow = .true.  : m_i+m_j > m_N  -> no product bin (Rung 1: skip pair)
++!!   otherwise product = weight w1 into bin k1, weight w2 into bin k2 (k2=k1+1),
++!!   with the exact top-bin case (m_i+m_j == m_N) collapsing to a single bin.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
++  implicit none
++  integer, intent(in)  :: i, j
++  integer, intent(out) :: k1, k2
++  real(double_precision), intent(out) :: w1, w2
++  logical, intent(out) :: is_overflow
++  real(double_precision) :: m_plus
++  integer :: k, k_lo
++
++  m_plus = mass_grid(i) + mass_grid(j)
++
++  if (m_plus > mass_grid(nb_grains) * (1.d0 + COAG_MASS_TOL)) then
++    is_overflow = .true.
++    k1 = 0; k2 = 0; w1 = 0.d0; w2 = 0.d0
++    return
++  endif
++  is_overflow = .false.
++
++  ! largest k with m_k <= m_plus (grid is monotone increasing in mass)
++  k_lo = 1
++  do k = 1, nb_grains
++    if (mass_grid(k) <= m_plus * (1.d0 + COAG_MASS_TOL)) k_lo = k
++  enddo
++
++  if (k_lo >= nb_grains) then
++    ! lands on (or numerically at) the top bin: single product, no k+1
++    k1 = nb_grains; k2 = nb_grains
++    w1 = 1.d0;       w2 = 0.d0
++  else
++    k1 = k_lo; k2 = k_lo + 1
++    ! eps = (m_{k+1} - m_plus) / (m_{k+1} - m_k)  -> weight on the lower bin
++    w1 = (mass_grid(k2) - m_plus) / (mass_grid(k2) - mass_grid(k1))
++    w2 = 1.d0 - w1
++  endif
++  return
++end subroutine coag_pair_target
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Count the coagulation pseudo-reactions (non-overflow unordered pairs)
++!! and record the skipped overflow pairs. Called BEFORE get_array_sizes so the
++!! reaction arrays are allocated large enough; sets the module-owned counter
++!! nb_coagulation_reactions that get_array_sizes adds to nb_reactions.
++!! Requires mass_grid (filled in get_grain_radii, which precedes get_array_sizes).
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine dust_coagulation_count()
++  implicit none
++  integer :: i, j, k1, k2, nover, npair
++  real(double_precision) :: w1, w2
++  logical :: is_overflow
++
++  nb_coagulation_reactions = 0
++  nover = 0
++  do i = 1, nb_grains
++    do j = i, nb_grains
++      call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
++      if (is_overflow) then
++        nover = nover + 1
++      else
++        nb_coagulation_reactions = nb_coagulation_reactions + 1
++      endif
++    enddo
++  enddo
++
++  coag_overflow_pairs_skipped = nover
++  ! Store the skipped (i,j) so the runtime dropped-flux diagnostic can sum
++  ! K_ij n_i n_j over exactly these pairs and assert it stays ~0.
++  if (allocated(coag_overflow_i)) deallocate(coag_overflow_i)
++  if (allocated(coag_overflow_j)) deallocate(coag_overflow_j)
++  allocate(coag_overflow_i(max(nover,1)), coag_overflow_j(max(nover,1)))
++  coag_overflow_i = 0; coag_overflow_j = 0
++  npair = 0
++  do i = 1, nb_grains
++    do j = i, nb_grains
++      call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
++      if (is_overflow) then
++        npair = npair + 1
++        coag_overflow_i(npair) = i
++        coag_overflow_j(npair) = j
++      endif
++    enddo
++  enddo
++
++  write(*,'(a,i0,a,i0,a)') ' (coagulation) generated ', nb_coagulation_reactions, &
++    ' pair reactions; ', coag_overflow_pairs_skipped, ' overflow pairs skipped (Rung 1 policy c).'
++  return
++end subroutine dust_coagulation_count
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Fill the coagulation reaction records at the NAME level (reactant/
++!! product species names, reaction type, redistribution weights). Names are
++!! resolved to species indices later by set_chemical_reactants, exactly as for
++!! chemistry. MUST run after read_reactions and BEFORE index_datas (its type
++!! scan needs REACTION_TYPE) and set_chemical_reactants/init_relevant_reactions
++!! (the Jacobian columns depend on the resolved reactant/product IDs).
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine dust_coagulation_inject_static()
++  implicit none
++  integer :: i, j, k1, k2, slot, ns
++  real(double_precision) :: w1, w2
++  logical :: is_overflow
++
++  call coag_assert_ice_free()
++  call coag_assert_type_unused()
++
++  ns = 0
++  do i = 1, nb_grains
++    do j = i, nb_grains
++      call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
++      if (is_overflow) cycle          ! Rung 1 policy (c): no reaction generated
++      ns = ns + 1
++      slot = nb_chemistry_reactions + ns
++
++      REACTION_COMPOUNDS_NAMES(:, slot) = ''
++      REACTION_COMPOUNDS_NAMES(1, slot) = YGRAIN(i)     ! reactant 1
++      REACTION_COMPOUNDS_NAMES(2, slot) = YGRAIN(j)     ! reactant 2
++      ! slot 3 (reactant 3) left blank -> no_species -> two-body in the RHS
++      REACTION_COMPOUNDS_NAMES(4, slot) = YGRAIN(k1)    ! product 1 (lower bin)
++      REACTION_COMPOUNDS_NAMES(5, slot) = YGRAIN(k2)    ! product 2 (upper bin)
++
++      REACTION_TYPE(slot) = COAGULATION_TYPE
++
++      ! Podolak/Brauer split on the product weights; loss stays unweighted.
++      REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
++      REACTION_PRODUCT_WEIGHTS(4, slot) = w1
++      REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++    enddo
++  enddo
++
++  if (ns /= nb_coagulation_reactions) then
++    write(error_unit,'(a,i0,a,i0)') 'Error (coagulation): filled ', ns, &
++      ' reactions but counted ', nb_coagulation_reactions
++    call exit(31)
++  endif
++  return
++end subroutine dust_coagulation_inject_static
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Set the coagulation rate coefficients (the kernel, with the diagonal
++!! 1/2). MUST run after index_datas -> init_reaction_rates, which would otherwise
++!! leave/overwrite these slots. Rung 1 uses the constant kernel K0; the Brownian
++!! kernel (temperature-dependent, recomputed per macro-step) lands at Rung 1b.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine dust_coagulation_set_rates()
++  implicit none
++  integer :: i, j, k1, k2, slot, ns
++  real(double_precision) :: w1, w2, kernel
++  logical :: is_overflow
++
++  if (constant_kernel_k0 <= 0.d0) then
++    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for Rung 1.'
++    call exit(31)
++  endif
++
++  ns = 0
++  do i = 1, nb_grains
++    do j = i, nb_grains
++      call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
++      if (is_overflow) cycle
++      ns = ns + 1
++      slot = nb_chemistry_reactions + ns
++
++      kernel = constant_kernel_k0                 ! Rung 1 validation kernel
++      if (i == j) kernel = 0.5d0 * kernel         ! unordered self-pair counted once
++      reaction_rates(slot) = kernel
++    enddo
++  enddo
++  return
++end subroutine dust_coagulation_set_rates
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Runtime diagnostic: total coagulation flux dropped by the Rung 1
++!! overflow policy, sum over skipped pairs of K_ij n_i n_j. Must stay ~0 over the
++!! validation window; a non-negligible value means the grid/K0 are misconfigured
++!! and the analytic gate is no longer valid. (Kernel wiring lands with Rung 1b;
++!! the constant kernel is used here as the placeholder scale.)
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++function dust_coagulation_dropped_flux() result(flux)
++  implicit none
++  real(double_precision) :: flux
++  integer :: p, i, j
++  real(double_precision) :: ni, nj, kernel
++
++  flux = 0.d0
++  if (coag_overflow_pairs_skipped <= 0) return
++  do p = 1, coag_overflow_pairs_skipped
++    i = coag_overflow_i(p); j = coag_overflow_j(p)
++    ni = abundances(INDGRAIN(i)); nj = abundances(INDGRAIN(j))
++    kernel = constant_kernel_k0
++    if (i == j) kernel = 0.5d0 * kernel
++    flux = flux + kernel * ni * nj
++  enddo
++  return
++end function dust_coagulation_dropped_flux
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++! Guards.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine coag_assert_ice_free()
++  implicit none
++  integer :: s
++  do s = 1, nb_species
++    if (species_name(s)(1:1) == 'J' .or. species_name(s)(1:1) == 'K') then
++      write(error_unit,'(a)') 'Error (coagulation): the network contains ice species (J/K) but'
++      write(error_unit,'(a)') '  coagulation does not transport ice until Rung 2. Running here would'
++      write(error_unit,'(a)') '  orphan the ice on grains that leave their bin. Use the ice-free'
++      write(error_unit,'(a)') '  fixture for Rung 1, or wait for ice-transport coupling.'
++      call exit(31)
++    endif
++  enddo
++  return
++end subroutine coag_assert_ice_free
++
++subroutine coag_assert_type_unused()
++  implicit none
++  integer :: r
++  do r = 1, nb_chemistry_reactions
++    if (REACTION_TYPE(r) == COAGULATION_TYPE) then
++      write(error_unit,'(a,i0,a)') 'Error (coagulation): reaction type ', COAGULATION_TYPE, &
++        ' is already used by the chemistry network; pick another COAGULATION_TYPE.'
++      call exit(31)
++    endif
++  enddo
++  return
++end subroutine coag_assert_type_unused
++
++end module dust_evolution
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index 55201f2..fcd6323 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -36,6 +36,7 @@ contains
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+ subroutine init_gasgrain()
+ use global_variables
++use dust_evolution
+ 
+ implicit none
+ 
+@@ -51,6 +52,10 @@ call read_parameters_in()           ! Read simulation parameters. Need to read i
+ call get_grain_radii()              ! Read grain radius in cm
+ call get_YGRAIN()                   ! initialize character variables YGRAIN and YGRAIN_MINUS
+ call read_element_in()              ! Read list of prime elements, including their atomic mass (in AMU)
++! Coagulation reactions are appended to the network as a terminal block. Count
++! them now -- after the grid (mass_grid) exists, BEFORE get_array_sizes sizes the
++! reaction arrays. Off by default => nb_coagulation_reactions stays 0.
++if (coagulation) call dust_coagulation_count()
+ call get_array_sizes()              ! Get various size needed for allocatable arrays
+ 
+ ! Physical structure of the 0D box.
+@@ -85,6 +90,13 @@ call read_species()
+ ! Read list of reactions for gas and grains
+ call read_reactions()
+ 
++! Append the coagulation pseudo-reactions at the NAME level (reactant/product
++! grain-bin names, type, redistribution weights). MUST precede index_datas -- its
++! type scan needs REACTION_TYPE -- and set_chemical_reactants/init_relevant_reactions,
++! which resolve the names to IDs the Jacobian columns are built from. Rates are set
++! later (after init_reaction_rates, which would otherwise clobber them). Off by default.
++if (coagulation) call dust_coagulation_inject_static()
++
+ ! Precompute the per-species / per-reaction grain-rank, phase and ice-species
+ ! index maps so the RHS need not re-parse species names on every call.
+ call build_index_maps()
+@@ -112,6 +124,10 @@ call get_gas_surface_species()
+ ! Initialization of elemental/chemical quantities
+ call index_datas()
+ 
++! Coagulation kernel coefficients. MUST follow index_datas -> init_reaction_rates
++! (which sets chemistry rates and would otherwise leave/overwrite the coag slots).
++if (coagulation) call dust_coagulation_set_rates()
++
+ ! Calculate the initial abundances for all elements that compose the species
+ ! Here it is assumed that all the cells in 1D have the same elemental abundances
+ allocate(temp_abundances(nb_species))
+@@ -1476,6 +1492,11 @@ if (IS_TEST.eq.1) then
+   ! CHECK that reactions are equilibrated (for prime elements)
+   do reaction=1,nb_reactions
+ !   write(*,*) reaction
++    ! Coagulation reactions conserve MASS via the per-product redistribution
++    ! weights, which this integer atom-count balance cannot see (2 grains -> 1
++    ! grain, split across two bins). Their conservation is validated by the
++    ! mass-conservation diagnostic (gate a), not here.
++    if (REACTION_TYPE(reaction).eq.COAGULATION_TYPE) cycle
+     do element=1,NB_PRIME_ELEMENTS
+       left_sum = 0
+       do compound=1,MAX_REACTANTS
+@@ -1505,6 +1526,7 @@ if (IS_TEST.eq.1) then
+ 
+   ! CHECK that reactions are equilibrated (for charge)
+   do reaction=1,nb_reactions
++    if (REACTION_TYPE(reaction).eq.COAGULATION_TYPE) cycle   ! neutral grain bins; see note above
+     left_sum = 0
+     do compound=1,MAX_REACTANTS
+       tmp_name = REACTION_COMPOUNDS_NAMES(compound,reaction)
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index b28b4f6..08c6d32 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -35,6 +35,17 @@ character(len=80)        :: dust_ic = 'MRN'                 !< 'MRN' or 'tabulat
+ !! non-negligible value at runtime means a_max is too low. Purely diagnostic in
+ !! stage 3 (no dynamics yet).
+ real(double_precision)   :: dust_mass_sink = 0.d0 !< [g per H] mass accumulated above m_N
++
++! --- Coagulation (Rung 1). All default OFF so the build stays bit-identical to
++!     nmgc-2.0 unless a run explicitly asks for it in parameters.in. ------------
++logical                  :: coagulation = .false.          !< master switch (parameters.in: coagulation)
++character(len=20)        :: coagulation_kernel = 'constant' !< 'constant' (Rung 1) | 'brownian' (Rung 1b)
++real(double_precision)   :: constant_kernel_k0 = 0.d0       !< [cm^3/s] constant kernel K0 for validation
++integer                  :: nb_chemistry_reactions = 0      !< reactions before coagulation is appended
++integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions
++integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
++integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
++integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
+ integer                  :: stdo, ffli
+ ! real(double_precision), dimension(1:):: grain_radii
+ ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a
+@@ -673,6 +684,14 @@ close(902)
+ nb_species = nb_species_for_gas + nb_species_for_grain ! The total number of species, sum of species in gas and grain
+ nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number of reactions, sum of species in gas and grain
+ 
++! Coagulation reactions are appended as a contiguous terminal block. Their count
++! is computed in dust_coagulation_count() (called from init_gasgrain right after
++! the grid is built, BEFORE this routine) and merely added here, so the reaction
++! arrays are allocated large enough. nb_coagulation_reactions is 0 when
++! coagulation is off, keeping nb_reactions -- and the whole build -- unchanged.
++nb_chemistry_reactions = nb_reactions
++nb_reactions = nb_reactions + nb_coagulation_reactions
++
+ ! write(*,*)"nb_species_for_gas",nb_species_for_gas,"nb_gas_phase_reactions",nb_gas_phase_reactions
+ ! write(*,*)"nb_species_for_grain",nb_species_for_grain,"nb_surface_reactions",nb_surface_reactions
+ ! write(*,*)"nb_species,nb_reactions",nb_species,nb_reactions
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index ea3fd88..4208025 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -869,6 +869,12 @@ if (isDefined) then
+         read(value, '(e12.6)') dust_power_law_index
+       case('dust_grid_source')
+         read(value, *) dust_grid_source
++      case('coagulation')                         ! Rung 1 master switch (default off)
++        read(value, '(l1)') coagulation
++      case('coagulation_kernel')                  ! 'constant' (Rung 1) | 'brownian' (Rung 1b)
++        read(value, *) coagulation_kernel
++      case('constant_kernel_k0')                  ! [cm^3/s] constant kernel for the analytic gate
++        read(value, '(e12.6)') constant_kernel_k0
+       case('dust_ic')
+         read(value, *) dust_ic
+       case('sparsity')
+-- 
+2.43.0
+

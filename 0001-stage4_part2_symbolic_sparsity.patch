@@ -1,0 +1,454 @@
+From d39cd1e5d325065217a9d9f3c966c7df2d3e8c6d Mon Sep 17 00:00:00 2001
+From: Sacha Gavino <sacha.gavino@gmail.com>
+Date: Sat, 8 Aug 2026 11:11:39 +0000
+Subject: [PATCH] Stage 4 Part 2: symbolic Jacobian sparsity (default),
+ numerical retained
+
+set_work_arrays rebuilt the Jacobian sparsity pattern on every solver step by
+evaluating the Jacobian and keeping entries above 1e-99. That threshold is
+value-dependent: it drops structurally-nonzero-but-tiny couplings, and which it
+drops shifts step to step (docs/STAGE4_SPARSITY.md). Benign for pure gas-grain
+chemistry -- the error test runs on the true RHS, so an incomplete Jacobian only
+costs Newton iterations -- but a latent correctness bug for coagulation, where a
+coupling that goes tiny as a bin empties (never disabled, just small) would drop
+out of the pattern exactly when it matters. This replaces it, before coagulation
+lands, with a fixed symbolic pattern built once from the reaction list.
+
+New `sparsity` parameter: 'symbolic' (default) or 'numerical'.
+  - symbolic: build_symbolic_sparsity() marks (row=any compound, col=any
+    reactant) for every reaction, plus the diagonal -- a superset of every entry
+    get_jacobian can ever write, with NO value-dependent pruning anywhere (the
+    temperature-window / small-rate trap is thereby avoided by construction).
+    Built once, reused every step.
+  - numerical: the exact pre-stage-4 path, kept for reproducibility and pinned by
+    the nmgc-2.0 equivalence test.
+
+The pattern is assembled from an explicit list of (row, col) couplings, sorted
+into CSC -- so coagulation can append its grain-column and cross-bin ice-transfer
+couplings later without rewriting the builder.
+
+A debug guard (sparsity_check_steps, default 5) asserts on the first N steps that
+every numerically-nonzero Jacobian entry lies inside the symbolic pattern; by
+construction it never fires -- if it ever does, the builder has a bug, not a
+tolerance to relax. equivalence.sh now pins sparsity=numerical for the NEMO side
+(same commit), so the external regression stays valid once symbolic is default.
+
+Kept as its own commit: this is the one stage-4 change that could legitimately
+alter the trajectory, so a later coagulation bisect can isolate it.
+
+Verified:
+  - numerical mode is byte-identical to the pre-Part-2 build (the refactor does
+    not disturb the numerical path; the nmgc-2.0 equivalence is preserved);
+  - the debug subset-assert held on every symbolic run;
+  - gate (design-thread spec): per-species, evaluated as the max over output
+    times, symbolic-vs-numerical difference must be <= the RTOL-perturbation
+    difference for that same species, RTOL perturbed both ways (1e-4 -> 1.001e-4
+    and 0.999e-4, max of the two). On the full-length reference run (1e5 yr, 20
+    outputs, 911 species): the RTOL tweak moves species by up to 3.1e-3 relative,
+    while symbolic-vs-numerical is exactly 0 -- symbolic is byte-identical to
+    numerical here, not merely within the noise floor. Zero violations. Also
+    byte-identical on a derived 4-bin MRN case, and tests/roundtrip_derived.sh
+    passes under the (now default) symbolic path.
+
+This closes Stage 4. The 0D gas-grain-dust skeleton is complete; coagulation is
+the next stage.
+---
+ inputs/parameters.in                     |   2 +
+ src/gasgrain.f90                         |   4 +
+ src/global_variables.f90                 |  14 ++
+ src/input_output.f90                     |  11 ++
+ src/ode_solver.f90                       | 241 +++++++++++++++++++++--
+ tests/equivalence.sh                     |  15 ++
+ tests/reference_0D_2grains/parameters.in |   2 +
+ 7 files changed, 275 insertions(+), 14 deletions(-)
+
+diff --git a/inputs/parameters.in b/inputs/parameters.in
+index 390a0f6..3e29b51 100644
+--- a/inputs/parameters.in
++++ b/inputs/parameters.in
+@@ -64,6 +64,8 @@ mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins der
+ !*****************************
+ dust_ic = MRN ! MRN | tabulated
+ dust_power_law_index = -3.500E+00 ! dn/da ~ a^index (-3.5 = MRN); normalised by initial_dtg_mass_ratio
++sparsity = symbolic ! symbolic (default) or numerical
++sparsity_check_steps = 5 ! debug: assert numerical subset symbolic on first N steps (0 disables)
+ 
+ !*****************************
+ !*      Grain parameters     *
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index b27eff2..55201f2 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -193,6 +193,10 @@ call init_relevant_reactions()
+ !! the jacobian
+ call count_nonzeros()
+ 
++! In symbolic mode, build the fixed sparsity superset once from the reaction list
++! (also raises nb_nonzeros_values to the symbolic per-column max for work sizing).
++if (sparsity.eq.'symbolic') call build_symbolic_sparsity()
++
+ 
+ ! Do preliminary tests, before starting the integration
+ ! Writing information in 'info.out'
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 3bed76e..82f4951 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -414,6 +414,20 @@ real(double_precision), dimension(:), allocatable :: RWORK !< dim(lrw) real work
+ !!\n          output, available in IWORK(17).)
+ integer :: nb_nonzeros_values !< number of non-zeros values in the jacobian. This is usefull for ODEPACK, to increase speed
+ 
++! ---- stage-4 Part 2: Jacobian sparsity method ----
++! 'numerical' rebuilds the pattern every step by evaluating the Jacobian and
++! thresholding at 1e-99 (the pre-stage-4 behaviour; value-dependent, so it drops
++! genuinely-nonzero-but-tiny couplings and varies step to step). 'symbolic'
++! builds one fixed superset once from the reaction list, so no real coupling is
++! ever dropped. Default symbolic; 'numerical' is kept for exact reproduction of
++! pre-stage-4 / nmgc-2.0 results (equivalence.sh must pin it).
++character(len=80) :: sparsity = 'symbolic'   !< 'symbolic' or 'numerical'
++integer :: sparsity_check_steps = 5          !< debug: on the first N set_work_arrays calls, assert numerical nonzeros subset of the symbolic pattern (0 disables). Symbolic mode only.
++integer, allocatable, dimension(:) :: IA_SYM !< dim(nb_species+1) column pointers of the symbolic pattern (CSC)
++integer, allocatable, dimension(:) :: JA_SYM !< row indices of the symbolic pattern (CSC), ascending within each column
++integer :: NNZ_SYM = 0                        !< number of nonzeros in the symbolic pattern
++integer :: n_sparsity_checks_done = 0         !< how many startup subset-asserts have run
++
+ ! Diffusion and 1D variables
+ real(double_precision) :: X_IONISATION_RATE !< Ionisation rate due to X-rays [s-1]
+ real(double_precision) :: NH  ! column density [cm-2] (for the self shielding)
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index fda5be1..ea3fd88 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -413,6 +413,13 @@ use global_variables
+     ' ! MRN exponent dn/da ~ a^index (-3.5 = MRN), normalised by initial_dtg_mass_ratio'
+   write(10,'(a)') ""
+   write(10,'(a)') "!*****************************"
++  write(10,'(a)') "!*   Jacobian sparsity       *"
++  write(10,'(a)') "!*****************************"
++  write(10,'(a,a,a)') 'sparsity = ', trim(sparsity), ' ! symbolic (default) or numerical (pin for the nmgc-2.0 equivalence test)'
++  write(10,'(a,i0,a)') 'sparsity_check_steps = ', sparsity_check_steps, &
++    ' ! debug: assert numerical nonzeros subset symbolic on the first N steps (0 disables)'
++  write(10,'(a)') ""
++  write(10,'(a)') "!*****************************"
+   write(10,'(a)') "!*      Grain parameters     *"
+   write(10,'(a)') "!*****************************"
+   write(10,'(a)') ""
+@@ -864,6 +871,10 @@ if (isDefined) then
+         read(value, *) dust_grid_source
+       case('dust_ic')
+         read(value, *) dust_ic
++      case('sparsity')
++        read(value, *) sparsity
++      case('sparsity_check_steps')
++        read(value, '(i8)') sparsity_check_steps
+         
+       case('diffusion_barrier_thickness', 'ACM') ! The old name is kept for compatibility reasons
+         read(value, '(e12.6)') DIFFUSION_BARRIER_THICKNESS
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index 83e597a..530db67 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -179,6 +179,203 @@ nb_nonzeros_values = max_nonzeros
+ return
+ end subroutine count_nonzeros
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Build the Jacobian sparsity pattern ONCE, symbolically, from the
++!! reaction list -- a fixed superset of the numerical pattern, with no
++!! value-dependent pruning anywhere (so no temperature-window / small-rate
++!! coupling is ever dropped). Entry (row=i, col=j) is marked whenever species j
++!! is a reactant of some reaction and i is any compound (reactant or product) of
++!! that reaction -- exactly the entries get_jacobian can write -- plus the
++!! diagonal. The couplings are assembled into an explicit list first, so future
++!! coagulation terms can append their (row, col) couplings before the CSC
++!! pattern is finalised, without rewriting this routine.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine build_symbolic_sparsity()
++use global_variables
++implicit none
++
++integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol
++integer(kind=8) :: N1
++integer(kind=8), allocatable :: keys(:)
++integer, dimension(MAX_COMPOUNDS) :: reac, comp
++integer :: nreac, ncomp, a, b
++
++no_species = nb_species + 1
++N1 = int(nb_species, 8) + 1_8
++
++! ---- pass 1: upper-bound the number of couplings (duplicates allowed) ----
++ncoup = nb_species                                  ! the diagonal
++do r=1,nb_reactions
++  nreac = 0 ; ncomp = 0
++  do s=1,MAX_REACTANTS
++    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) nreac = nreac + 1
++  enddo
++  do s=1,MAX_COMPOUNDS
++    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) ncomp = ncomp + 1
++  enddo
++  ncoup = ncoup + nreac*ncomp
++enddo
++
++allocate(keys(ncoup))
++
++! ---- pass 2: emit one key per (col=reactant, row=any compound) coupling ----
++m = 0
++do r=1,nb_reactions
++  nreac = 0 ; ncomp = 0
++  do s=1,MAX_REACTANTS
++    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) then
++      nreac = nreac + 1 ; reac(nreac) = REACTION_COMPOUNDS_ID(s,r)
++    endif
++  enddo
++  do s=1,MAX_COMPOUNDS
++    if (valid_species(REACTION_COMPOUNDS_ID(s,r))) then
++      ncomp = ncomp + 1 ; comp(ncomp) = REACTION_COMPOUNDS_ID(s,r)
++    endif
++  enddo
++  do a=1,nreac
++    jcol = reac(a)
++    do b=1,ncomp
++      irow = comp(b)
++      m = m + 1
++      keys(m) = int(jcol,8)*N1 + int(irow,8)
++    enddo
++  enddo
++enddo
++do irow=1,nb_species                                ! diagonal
++  m = m + 1
++  keys(m) = int(irow,8)*N1 + int(irow,8)
++enddo
++
++! ---- pass 3: sort ascending (key = col*(N+1)+row -> sorts by column then row) ----
++call heapsort_i8(keys, ncoup)
++
++! ---- pass 4: dedupe consecutive keys, emit CSC (IA_SYM, JA_SYM) ----
++if (.not.allocated(IA_SYM)) allocate(IA_SYM(nb_species+1))
++if (.not.allocated(JA_SYM)) allocate(JA_SYM(ncoup))
++jj = 0
++c_prev = 0
++do m=1,ncoup
++  if (m.gt.1 .and. keys(m).eq.keys(m-1)) cycle
++  jcol = int(keys(m)/N1)
++  irow = int(keys(m) - int(jcol,8)*N1)
++  if (jcol.ne.c_prev) then
++    do curcol = c_prev+1, jcol
++      IA_SYM(curcol) = jj+1
++    enddo
++    c_prev = jcol
++  endif
++  jj = jj + 1
++  JA_SYM(jj) = irow
++enddo
++do curcol = c_prev+1, nb_species
++  IA_SYM(curcol) = jj+1
++enddo
++IA_SYM(nb_species+1) = jj+1
++NNZ_SYM = jj
++
++! ---- size the solver work arrays for the (denser) symbolic pattern ----
++maxcol = 0
++do curcol=1,nb_species
++  cnt = IA_SYM(curcol+1) - IA_SYM(curcol)
++  if (cnt.gt.maxcol) maxcol = cnt
++enddo
++nb_nonzeros_values = max(nb_nonzeros_values, maxcol)
++
++deallocate(keys)
++return
++
++contains
++
++  logical function valid_species(idx)
++    integer, intent(in) :: idx
++    valid_species = (idx.ne.no_species .and. idx.ge.1 .and. idx.le.nb_species)
++  end function valid_species
++
++  ! ascending in-place heapsort of an int64 array (init-time, no recursion)
++  subroutine heapsort_i8(a, n)
++    integer, intent(in) :: n
++    integer(kind=8), intent(inout) :: a(n)
++    integer :: start, end_, root, child
++    integer(kind=8) :: tmp
++    do start = n/2, 1, -1
++      root = start
++      do
++        child = 2*root
++        if (child.gt.n) exit
++        if (child+1.le.n) then
++          if (a(child).lt.a(child+1)) child = child + 1
++        endif
++        if (a(root).lt.a(child)) then
++          tmp = a(root) ; a(root) = a(child) ; a(child) = tmp
++          root = child
++        else
++          exit
++        endif
++      enddo
++    enddo
++    do end_ = n, 2, -1
++      tmp = a(1) ; a(1) = a(end_) ; a(end_) = tmp
++      root = 1
++      do
++        child = 2*root
++        if (child.gt.end_-1) exit
++        if (child+1.le.end_-1) then
++          if (a(child).lt.a(child+1)) child = child + 1
++        endif
++        if (a(root).lt.a(child)) then
++          tmp = a(root) ; a(root) = a(child) ; a(child) = tmp
++          root = child
++        else
++          exit
++        endif
++      enddo
++    enddo
++  end subroutine heapsort_i8
++
++end subroutine build_symbolic_sparsity
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Debug guard: assert every numerically-nonzero Jacobian entry at the
++!! current state lies inside the symbolic pattern. By construction it must, so
++!! this never fires; if it ever does, the symbolic builder has a bug (a real
++!! coupling is missing), not a tolerance to relax. Run only on the first few
++!! steps in symbolic mode.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine assert_numerical_subset_symbolic(Y)
++use global_variables
++implicit none
++real(double_precision), intent(in), dimension(nb_species) :: Y
++real(double_precision), dimension(nb_species) :: PDJ
++integer, parameter :: dummy_n = 3
++real(double_precision), parameter :: dummy_t = 0.d0
++real(double_precision), dimension(dummy_n) :: dummy_ian, dummy_jan
++integer :: i, j, k
++logical :: found
++
++do j=1,nb_species
++  call get_jacobian(n=dummy_n, t=dummy_t, y=Y, j=j, ian=dummy_ian, jan=dummy_jan, pdj=PDJ)
++  do i=1,nb_species
++    if (PDJ(i).ne.0.d0) then
++      found = .false.
++      do k=IA_SYM(j), IA_SYM(j+1)-1
++        if (JA_SYM(k).eq.i) then
++          found = .true.
++          exit
++        endif
++      enddo
++      if (.not.found) then
++        write(Error_unit,*) 'FATAL: symbolic sparsity pattern is missing a numerically-nonzero'
++        write(Error_unit,*) 'Jacobian entry (row,col) = ', i, j, ' -- the builder has a bug.'
++        stop
++      endif
++    endif
++  enddo
++enddo
++
++return
++end subroutine assert_numerical_subset_symbolic
++
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @author 
+ !> Christophe Cossou & Franck Hersant
+@@ -2236,27 +2433,43 @@ if (.not.(first_step_done)) then
+   IWORK(6)=10000
+ endif
+ 
+-k=1
++if (sparsity.eq.'symbolic') then
+ 
+-do j=1,nb_species
+-  call get_jacobian(n=dummy_n, t=dummy_t, y=Y,j=J,ian=dummy_ian, jan=dummy_jan, pdj=PDJ)
++  ! ---- symbolic: reuse the fixed pattern built once at init ----
++  if (sparsity_check_steps.gt.0 .and. n_sparsity_checks_done.lt.sparsity_check_steps) then
++    call assert_numerical_subset_symbolic(Y)
++    n_sparsity_checks_done = n_sparsity_checks_done + 1
++  endif
++  NNZ = NNZ_SYM
++  iwork(30+1:30+nb_species+1)         = IA_SYM(1:nb_species+1)
++  iwork(31+nb_species+1:31+nb_species+NNZ) = JA_SYM(1:NNZ)
+ 
+-  IA(j)=k
++else
++
++  ! ---- numerical: rebuild the pattern this step by thresholding the Jacobian ----
++  k=1
++
++  do j=1,nb_species
++    call get_jacobian(n=dummy_n, t=dummy_t, y=Y,j=J,ian=dummy_ian, jan=dummy_jan, pdj=PDJ)
++
++    IA(j)=k
++
++    do i=1,nb_species
++      if (abs(PDJ(i)).gt.1.d-99) then
++        JA(k)=i
++        k=k+1
++      endif
++    enddo
+ 
+-  do i=1,nb_species
+-    if (abs(PDJ(i)).gt.1.d-99) then
+-      JA(k)=i
+-      k=k+1
+-    endif
+   enddo
+ 
+-enddo
++  IA(nb_species+1)=k
+ 
+-IA(nb_species+1)=k
++  NNZ=IA(nb_species+1)-1
++  iwork(30+1:30+nb_species+1)=IA(1:nb_species+1)
++  iwork(31+nb_species+1:31+nb_species+NNZ)=JA(1:NNZ)
+ 
+-NNZ=IA(nb_species+1)-1
+-iwork(30+1:30+nb_species+1)=IA(1:nb_species+1)
+-iwork(31+nb_species+1:31+nb_species+NNZ)=JA(1:NNZ)
++endif
+ 
+ return
+ end subroutine set_work_arrays
+diff --git a/tests/equivalence.sh b/tests/equivalence.sh
+index c9425c1..48f1d6f 100755
+--- a/tests/equivalence.sh
++++ b/tests/equivalence.sh
+@@ -35,6 +35,21 @@ done
+ cp "$CASE/dust_grid_table.in" "$WORK/ref/0D_grain_sizes.in"
+ rm -f "$WORK/ref/dust_grid_table.in"
+ 
++# The reference (nmgc-2.0) uses the numerical Jacobian sparsity. The symbolic
++# path is a deliberate, non-bit-identical stage-4 change, so pin the NEMO side to
++# numerical for this equivalence test -- otherwise the default build diverges
++# from the reference by construction. (nmgc-2.0 has no 'sparsity' key and never
++# sees one; it is numerical inherently.)
++python3 - "$WORK/new/parameters.in" <<'PY'
++import sys, re
++p = sys.argv[1]; s = open(p).read()
++if re.search(r'(?m)^sparsity\s*=', s):
++    s = re.sub(r'(?m)^(sparsity\s*=\s*)\S+', r'\g<1>numerical', s)
++else:
++    s += '\nsparsity = numerical\n'
++open(p, 'w').write(s)
++PY
++
+ # the reference still needs the parameters NEMO has dropped
+ cp "$REF_REPO/inputs/parameters.in" "$WORK/ref/parameters.in"
+ python3 - "$WORK/ref/parameters.in" "$CASE/parameters.in" <<'PY'
+diff --git a/tests/reference_0D_2grains/parameters.in b/tests/reference_0D_2grains/parameters.in
+index 8b80e5d..94e8f86 100644
+--- a/tests/reference_0D_2grains/parameters.in
++++ b/tests/reference_0D_2grains/parameters.in
+@@ -33,6 +33,8 @@ is_crid = 0 ! Switch to turn on the CRID (cosmic rays induced diffusion) mechani
+ is_er_cir = 0 ! Switch to turn on Eley-Rideal and Complex Induced Reaction mechanisms (default=0: desactivated)
+ grain_tunneling_diffusion = 0 ! 0=thermal; For H,H2: 1=QM1; 2=QM2; 3=choose fastest
+ modify_rate_flag = 0 ! 1=modify H; 2=modify H,H2, 3=modify all, -1=H+H only
++sparsity = numerical ! symbolic (default) or numerical
++sparsity_check_steps = 5 ! debug: assert numerical subset symbolic on first N steps (0 disables)
+ conservation_type = 0 ! 0=only e- conserved; 1=elem #1 conserved, 2=elem #1 & #2, etc
+ 
+ !*****************************
+-- 
+2.43.0
+

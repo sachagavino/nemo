@@ -1,0 +1,146 @@
+From e959a7a6b98bad3d764f4f71ea559fc17d337d73 Mon Sep 17 00:00:00 2001
+From: Sacha Gavino <sacha.gavino@gmail.com>
+Date: Sun, 19 Jul 2026 15:32:18 +0000
+Subject: [PATCH 3/3] Measure the Jacobian sparsity pattern before the stage-4
+ swap
+
+Stage 4 asks to replace the numerical sparsity inference in set_work_arrays
+with a symbolic build from the reaction list, and to re-verify bit-identical
+afterwards. Measured whether that is achievable before writing any of it. It
+is not, for a structural reason, and the note records the numbers.
+
+The current code does not use one fixed sparsity pattern: set_work_arrays
+rebuilds IA/JA every solver step from the current abundances, keeping entries
+above 1e-99. Because which entries fall under the cut depends on the
+abundances, the pattern moves along the trajectory -- at least 5 distinct
+structures over 9 steps of the reference case, with nnz(>1e-99) below
+nnz(/=0) by 14-32 at every step. A symbolic build produces one fixed superset,
+and one fixed pattern cannot equal a pattern that changes every step, so the
+swap necessarily perturbs the trajectory in the last bits. That is inherent to
+the optimisation: factorising one reused structure instead of re-inferring it
+is precisely where the speedup comes from.
+
+Building the symbolic pattern correctly is the easy half. From the reaction
+list: 29179 entries naive, 29176 once within-reaction cancellation is honoured
+(a species that is both reactant and product of the same reaction receives
++tmp and -tmp with identical tmp, an exact bit-zero), and 27296 once
+identically-zero-rate channels are dropped -- within 6 entries of the 27290
+numerical structural union. So the cancellation subtlety is real but tiny
+(3 entries); the large gap is 1880 disabled channels.
+
+Consequence for stage 4: its two parts need different acceptance tests. The
+set_dependant_rates index-map precompute is a pure refactor and must stay
+byte-identical. The symbolic sparsity is bit-changing by construction and
+should be gated on the pattern being a proven superset of the numerical one at
+every step, plus a tight relative tolerance on the reference trajectory,
+rather than on cmp. The derived round-trip stays byte-identical either way,
+being a self-consistency check independent of the sparsity method.
+
+No source change: the instrumentation used to obtain these numbers was a
+throwaway block in set_work_arrays plus a diagnostic routine, and was reverted.
+The current code remains bit-identical to nmgc-2.0.
+---
+ docs/STAGE4_SPARSITY.md | 91 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 91 insertions(+)
+ create mode 100644 docs/STAGE4_SPARSITY.md
+
+diff --git a/docs/STAGE4_SPARSITY.md b/docs/STAGE4_SPARSITY.md
+new file mode 100644
+index 0000000..3b18113
+--- /dev/null
++++ b/docs/STAGE4_SPARSITY.md
+@@ -0,0 +1,91 @@
++# Stage 4, note: symbolic sparsity cannot be bit-identical (and why that's fine)
++
++**Status of the code as of this note:** NEMO reproduces NMGC-2.0 bit-identically
++(the stage-2 equivalence result, worst relative difference 0). Nothing here has
++changed that. This note is about a change Task 4 *proposes*, not a defect in the
++current code.
++
++## What Task 4 asks for
++
++Task 4 has two independent parts:
++
++1. **Precompute the RHS index maps.** `set_dependant_rates` recovers a grain rank
++   per call via ~98 string comparisons and 14 `read(c_i,'(I2)')` parses, even
++   though `GRAIN_RANK(nb_reactions)` is already built once at init and already
++   used elsewhere. Wire the RHS to the precomputed map instead of re-deriving it.
++2. **Symbolic Jacobian sparsity.** Replace the numerical sparsity inference in
++   `set_work_arrays`/`count_nonzeros` (evaluate the Jacobian, keep entries with
++   `|value| > 1e-99`) with a pattern built once from the reaction list.
++
++The spec asks to re-verify **bit-identical** after both. Part 1 can meet that.
++**Part 2 cannot**, for a structural reason measured below.
++
++## The measurement
++
++Instrumented `set_work_arrays` on the reference 0D 2-grain case (`-O0`) to record
++the pattern it hands DLSODES at every solver step, and built the symbolic pattern
++from the reaction list three ways for comparison.
++
++Per-step **numerical** pattern (what the current code actually uses), 9 steps:
++
++| step | nnz (`>1e-99`) | nnz (`≠0` exactly) | pattern changed? |
++|---|---|---|---|
++| 1 | 27128 | 27160 | — |
++| 2–3 | 27274 | 27288 | yes |
++| 4–6 | 27276 | 27290 | yes |
++| 7 | 27275 | 27290 | yes |
++| 8 | 27275 | 27290 | yes (different again) |
++| 9 | 27274 | 27290 | yes |
++
++At least **5 distinct sparsity structures across 9 steps.** The pattern is
++*value-dependent*: the `1e-99` cut drops structurally-nonzero-but-tiny entries,
++and which entries are tiny depends on the abundances, which move along the run.
++(Note `nnz(>1e-99) < nnz(≠0)` at every step by 14–32: the cut removes genuinely
++nonzero entries, not just exact zeros, and the removed set shifts step to step.)
++
++**Symbolic** pattern from the reaction list (built once):
++
++| pattern | nnz |
++|---|---|
++| naive — mark every compound of every reaction using species *j* | 29179 |
++| + within-reaction cancellation (a species that is both a reactant and a product gets `+tmp` and `−tmp`, exact bit-zero) | 29176 (−3) |
++| + drop identically-zero-rate (disabled) reaction channels | 27296 (−1880) |
++| numerical structural union (max `nnz(≠0)` over steps) | 27290 |
++
++So a *rate-aware* symbolic build lands within **6 entries** of the numerical
++structural pattern — getting symbolic sparsity *correct* is easy. The within-
++reaction cancellation subtlety is real but tiny (3 entries); the large gap versus
++the naive build (1880) is disabled/zero-rate channels.
++
++## The conclusion
++
++Symbolic sparsity is inherently a **bit-changing** optimization. Its purpose is to
++replace a per-step-varying, threshold-pruned structure with *one fixed superset*
++that DLSODES factorizes once and reuses — that reuse is the speedup, and it
++necessarily changes the last bits of the trajectory. A fixed pattern cannot equal
++a pattern that changes every step, so no amount of care makes Part 2 bit-identical
++to the current code (and therefore to NMGC-2.0).
++
++This means the literal Task-4 requirement — *symbolic sparsity **and** re-verify
++bit-identical* — is internally inconsistent for Part 2. The two parts need
++**different** acceptance tests:
++
++* **Part 1 (index maps):** pure refactor → gate on `cmp` byte-equality against a
++  baseline captured from the current code (equivalently, the equivalence test).
++* **Part 2 (symbolic sparsity):** gate on (i) the symbolic pattern being a proven
++  **superset** of the numerical pattern at every step (correctness: nothing real
++  dropped), and (ii) the reference trajectory agreeing to a tight **relative
++  tolerance** (suggest ~1e-10), *not* `cmp`. The derived round-trip
++  (`tests/roundtrip_derived.sh`) stays byte-identical regardless, since it is a
++  self-consistency check unaffected by the sparsity method.
++
++## Decision needed from the design thread
++
++Confirm the Part 2 acceptance criterion (superset + tight-rtol, in place of
++bit-identical). Once confirmed, Part 1 can be implemented and proven bit-identical
++immediately; Part 2 follows under the relaxed gate.
++
++(Reproducing the measurement: the instrumentation was a throwaway block in
++`set_work_arrays` plus a `sparsity_symbolic_diagnostic` routine; it was reverted
++and is not in the tree. It can be reinstated from this note if the numbers need
++re-checking on a different case.)
+-- 
+2.43.0
+

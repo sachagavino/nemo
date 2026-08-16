@@ -216,8 +216,8 @@ subroutine dust_coagulation_set_rates()
   real(double_precision) :: w1, w2
   logical :: is_overflow
 
-  if (constant_kernel_k0 <= 0.d0) then
-    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for Rung 1.'
+  if (trim(coagulation_kernel) == 'constant' .and. constant_kernel_k0 <= 0.d0) then
+    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for the constant kernel.'
     call exit(31)
   endif
 
@@ -246,13 +246,28 @@ function coag_kernel(i, j) result(kern)
   implicit none
   integer, intent(in) :: i, j
   real(double_precision) :: kern
+  real(double_precision) :: ai, aj, mu
 
   select case (trim(coagulation_kernel))
   case ('constant')
     kern = constant_kernel_k0
+  case ('brownian')
+    ! Free-molecular (kinetic) Brownian coagulation kernel:
+    !   K_ij = pi (a_i+a_j)^2 <v_rel>,   <v_rel> = sqrt( 8 k_B T / (pi mu_ij) )
+    !        = (a_i+a_j)^2 * sqrt( 8 pi k_B T / mu_ij )        [cm^3 s^-1]
+    ! <v_rel> is the MEAN (not RMS) relative thermal speed of a Maxwell-Boltzmann
+    ! pair -- this fixes the prefactor convention. The gas is the momentum bath, so
+    ! T is the GAS temperature (grain surface temperature is a different quantity and
+    ! does not enter here). The reduced mass mu_ij = m_i m_j/(m_i+m_j) keeps the full
+    ! per-bin mass dependence: the single gas T only makes the temperature factor
+    ! common across pairs, it does NOT make the kernel uniform. p_stick = 1.
+    ai = grain_radii(i)
+    aj = grain_radii(j)
+    mu = mass_grid(i) * mass_grid(j) / (mass_grid(i) + mass_grid(j))
+    kern = (ai + aj)**2 * sqrt(8.d0 * PI * K_B * gas_temperature / mu)
   case default
     write(error_unit,'(3a)') 'Error (coagulation): unknown coagulation_kernel "', &
-      trim(coagulation_kernel), '" (Rung 1 supports: constant).'
+      trim(coagulation_kernel), '" (v1 supports: constant, brownian).'
     call exit(31)
   end select
   if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once

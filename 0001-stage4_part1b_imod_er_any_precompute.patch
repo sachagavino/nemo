@@ -1,0 +1,304 @@
+From 4769254ecb4d74aaa4f52db4aa335f724ad5064b Mon Sep 17 00:00:00 2001
+From: Sacha Gavino <sacha.gavino@gmail.com>
+Date: Fri, 7 Aug 2026 22:32:33 +0000
+Subject: [PATCH] Stage 4 Part 1b: precompute the IMOD / ER / ANY
+ classification
+
+The type-14 grain-surface loop in set_dependant_rates re-derived, on every RHS
+call, a per-reaction classification purely from compound names: the IMOD1/IMOD2
+diffusion-modification flags (JH/JH2/JO base, then the MODIFY_RATE_FLAG atom
+list), the ANY(J)/ANY(K) "has a surface/mantle compound" tests, the JH2+JH2
+encounter-desorption test, and the three Eley-Rideal accretion-correction
+patterns. MODIFY_RATE_FLAG and GRAIN_TUNNELING_DIFFUSION are run constants, so
+this whole classification is a pure function of (reaction, config) and is now
+built once in build_index_maps.
+
+New per-reaction maps: IMOD1_BASE/IMOD2_BASE (feed the tunnelling gate),
+IMOD1_FINAL/IMOD2_FINAL (base transformed by the MODIFY_RATE_FLAG block, feed
+modify_specific_rates), HAS_SURFACE_COMPOUND, HAS_MANTLE_COMPOUND,
+IS_H2H2_SURFACE, and ER_PATTERN. The base->final transition was verified to be
+config-only: the tunnelling logic between the two uses reads per-call rates but
+never writes IMOD, and modify_specific_rates receives the per-call abundances as
+separate arguments, so IMOD collapses fully to lookups. The per-call physics
+(tunnelling, activation barrier, modify_specific_rates) is untouched; only the
+name classification moved to init. A dead empty JH+JH guard (no body) was
+removed. This closes Part 1: no per-call string parse or comparison remains in
+the RHS grain path.
+
+Kept as its own commit (separate from Part 1a) because the IMOD base-then-modify
+control flow is the subtle part; isolating it keeps a later coagulation bisect
+pointed at one focused change.
+
+Verified byte-identical against the Part-1a build. Because the defaults
+(grain_tunneling_diffusion=0, modify_rate_flag=0) skip the tunnelling and MODIFY
+blocks entirely, verification used configurations that actually exercise them:
+  - grain_tunneling_diffusion=3, modify_rate_flag=3, is_er_cir=1  (QM3 tunnelling
+    + the atom-list final classification + ER patterns),
+  - grain_tunneling_diffusion=1, modify_rate_flag=-1,
+  - modify_rate_flag=1,
+each confirmed to change the trajectory versus default and each byte-identical
+between the two builds; plus the tabulated reference case, a derived 4-bin MRN
+case (abundances/elemental/dust_distribution), and tests/roundtrip_derived.sh.
+---
+ src/global_variables.f90 | 13 +++++++
+ src/input_output.f90     | 76 ++++++++++++++++++++++++++++++++++++++
+ src/ode_solver.f90       | 80 +++++++++-------------------------------
+ 3 files changed, 106 insertions(+), 63 deletions(-)
+
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 6066ca3..3bed76e 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -162,6 +162,19 @@ integer, allocatable, dimension(:) :: SPECIES_PHASE         ! dim(nb_species): 1
+ integer, allocatable, dimension(:) :: SPECIES_ICE_CODE      ! dim(nb_species): tracked surface ice, 0 none / 1 CO / 2 H2O / 3 NH3 / 4 CO2 / 5 CH4 / 6 CH3OH (J phase only)
+ integer, allocatable, dimension(:) :: REACTION_C4_GRAIN_RANK ! dim(nb_reactions): grain rank from REACTION_COMPOUNDS_NAMES(4,i)(2:3) when J/K-prefixed, else 0
+ 
++! ---- stage-4 Part 1b: IMOD classification + ANY/ER flags, precomputed once ----
++! MODIFY_RATE_FLAG and GRAIN_TUNNELING_DIFFUSION are run-constants, so the whole
++! IMOD classification of a type-14 grain-surface reaction is a pure function of
++! (reaction, config). IMOD*_base feeds the tunnelling gate; IMOD*_final (base
++! transformed by the MODIFY_RATE_FLAG block) feeds modify_specific_rates. These
++! replace the per-RHS-call name comparisons; the per-call physics is untouched.
++integer, allocatable, dimension(:) :: IMOD1_BASE, IMOD2_BASE   ! dim(nb_reactions)
++integer, allocatable, dimension(:) :: IMOD1_FINAL, IMOD2_FINAL ! dim(nb_reactions)
++logical, allocatable, dimension(:) :: HAS_SURFACE_COMPOUND     ! dim(nb_reactions): ANY compound is a 'J' species
++logical, allocatable, dimension(:) :: HAS_MANTLE_COMPOUND      ! dim(nb_reactions): ANY compound is a 'K' species
++logical, allocatable, dimension(:) :: IS_H2H2_SURFACE          ! dim(nb_reactions): both reactants are JH2 (encounter desorption)
++integer, allocatable, dimension(:) :: ER_PATTERN               ! dim(nb_reactions): 0 none / 1 C / 2 CH / 3 O (Eley-Rideal accretion correction)
++
+ ! 3 phase model
+ REAL(double_precision), allocatable, dimension(:) :: sumlaysurfsave !< Total number of layers on the grain surface
+ ! REAL(double_precision), dimension(1:nb_grains) :: sumlaysurfsave !< Total number of layers on the grain surface
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 34db459..fda5be1 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -1543,7 +1543,83 @@ do i=1,nb_reactions
+   endif
+ enddo
+ 
++! per-reaction IMOD classification + ANY/ER flags (stage-4 Part 1b). Mirrors the
++! name comparisons that the type-14 grain-surface loop and the ER/CIR accretion
++! corrections used to do on every RHS call. Computed for all reactions; only the
++! grain-surface / ER reactions ever read them.
++if (.not.allocated(IMOD1_BASE))           allocate(IMOD1_BASE(nb_reactions))
++if (.not.allocated(IMOD2_BASE))           allocate(IMOD2_BASE(nb_reactions))
++if (.not.allocated(IMOD1_FINAL))          allocate(IMOD1_FINAL(nb_reactions))
++if (.not.allocated(IMOD2_FINAL))          allocate(IMOD2_FINAL(nb_reactions))
++if (.not.allocated(HAS_SURFACE_COMPOUND)) allocate(HAS_SURFACE_COMPOUND(nb_reactions))
++if (.not.allocated(HAS_MANTLE_COMPOUND))  allocate(HAS_MANTLE_COMPOUND(nb_reactions))
++if (.not.allocated(IS_H2H2_SURFACE))      allocate(IS_H2H2_SURFACE(nb_reactions))
++if (.not.allocated(ER_PATTERN))           allocate(ER_PATTERN(nb_reactions))
++
++do i=1,nb_reactions
++  ! ---- IMOD base: JH / JH2 / JO on reactant 1 and reactant 2 (mirrors the
++  !      independent name tests; the three names are mutually exclusive) ----
++  IMOD1_BASE(i) = 0
++  IMOD2_BASE(i) = 0
++  if (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J') IMOD1_BASE(i)=1
++  if (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J') IMOD1_BASE(i)=2
++  if (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J') IMOD1_BASE(i)=3
++  if (REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J') IMOD2_BASE(i)=1
++  if (REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J') IMOD2_BASE(i)=2
++  if (REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J') IMOD2_BASE(i)=3
++
++  ! ---- ANY(J) / ANY(K) over all compound slots ----
++  HAS_SURFACE_COMPOUND(i) = ANY(REACTION_COMPOUNDS_NAMES(:,i)(1:1).eq.'J')
++  HAS_MANTLE_COMPOUND(i)  = ANY(REACTION_COMPOUNDS_NAMES(:,i)(1:1).eq.'K')
++
++  ! ---- encounter desorption: both reactants are JH2 ----
++  IS_H2H2_SURFACE(i) = (REACTION_COMPOUNDS_NAMES(1,i)(4:11).EQ.'H2      '.AND. &
++                        REACTION_COMPOUNDS_NAMES(2,i)(4:11).EQ.'H2      '.AND. &
++                        REACTION_COMPOUNDS_NAMES(1,i)(1:1).EQ.'J'.AND. &
++                        REACTION_COMPOUNDS_NAMES(2,i)(1:1).EQ.'J')
++
++  ! ---- Eley-Rideal accretion-correction pattern (reactant 1 C/CH/O whose
++  !      product slot 4 is the matching J species) ----
++  ER_PATTERN(i) = 0
++  if (REACTION_COMPOUNDS_NAMES(1,i)=="C          ".AND.REACTION_COMPOUNDS_NAMES(4,i)(4:11)=="C       ".AND. &
++      REACTION_COMPOUNDS_NAMES(4,i)(1:1)=="J") ER_PATTERN(i)=1
++  if (REACTION_COMPOUNDS_NAMES(1,i)=="CH         ".AND.REACTION_COMPOUNDS_NAMES(4,i)(4:11)=="CH      ".AND. &
++      REACTION_COMPOUNDS_NAMES(4,i)(1:1)=="J") ER_PATTERN(i)=2
++  if (REACTION_COMPOUNDS_NAMES(1,i)=="O          ".AND.REACTION_COMPOUNDS_NAMES(4,i)(4:11)=="O       ".AND. &
++      REACTION_COMPOUNDS_NAMES(4,i)(1:1)=="J") ER_PATTERN(i)=3
++
++  ! ---- IMOD final: base transformed by the MODIFY_RATE_FLAG block (a run
++  !      constant), reproducing lines that ran per call inside "if any-J". ----
++  IMOD1_FINAL(i) = IMOD1_BASE(i)
++  IMOD2_FINAL(i) = IMOD2_BASE(i)
++  if ((MODIFY_RATE_FLAG.EQ.-1).AND.(IMOD1_FINAL(i).NE.1.OR.IMOD2_FINAL(i).NE.1)) then
++    IMOD1_FINAL(i)=0
++    IMOD2_FINAL(i)=0
++  endif
++  if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD1_FINAL(i).NE.1)) IMOD1_FINAL(i)=0
++  if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD2_FINAL(i).NE.1)) IMOD2_FINAL(i)=0
++  if (MODIFY_RATE_FLAG.EQ.3) then
++    if (is_mod3_atom(REACTION_COMPOUNDS_NAMES(1,i))) IMOD1_FINAL(i)=3
++    if (is_mod3_atom(REACTION_COMPOUNDS_NAMES(2,i))) IMOD2_FINAL(i)=3
++  endif
++enddo
++
+ return
++
++contains
++
++  ! true iff nm is a J-phase atom in the MODIFY_RATE_FLAG==3 list (the same 13
++  ! atoms the per-call code tested for, identically for reactant 1 and 2).
++  logical function is_mod3_atom(nm)
++    character(len=*), intent(in) :: nm
++    is_mod3_atom = (nm(1:1).EQ.'J') .AND. ( &
++         nm(4:11).EQ.'H       '.OR.nm(4:11).EQ.'He      '.OR.nm(4:11).EQ.'C       '.OR. &
++         nm(4:11).EQ.'N       '.OR.nm(4:11).EQ.'O       '.OR.nm(4:11).EQ.'S       '.OR. &
++         nm(4:11).EQ.'Si      '.OR.nm(4:11).EQ.'Fe      '.OR.nm(4:11).EQ.'Na      '.OR. &
++         nm(4:11).EQ.'Mg      '.OR.nm(4:11).EQ.'P       '.OR.nm(4:11).EQ.'F       '.OR. &
++         nm(4:11).EQ.'Cl      ')
++  end function is_mod3_atom
++
+ end subroutine build_index_maps
+ 
+ 
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index c78f880..83e597a 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -1438,8 +1438,7 @@ abCO(1:nb_grains) = 0.d0
+     ! When Eley-Rideal and complex induced reaction are activated we must be carreful on how accretions rate are computed
+     IF(is_er_cir.ne.0) THEN
+ 
+-       IF(REACTION_COMPOUNDS_NAMES(1,J) == "C          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "C       " &
+-         .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
++       IF(ER_PATTERN(J).eq.1) THEN
+          ic_i = REACTION_C4_GRAIN_RANK(J)
+           IF(ab_surf(ic_i).le. ab_lay(ic_i)) THEN
+              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
+@@ -1450,8 +1449,7 @@ abCO(1:nb_grains) = 0.d0
+           ENDIF
+        ENDIF
+ 
+-       IF(REACTION_COMPOUNDS_NAMES(1,J) == "CH         " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "CH      " &
+-         .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
++       IF(ER_PATTERN(J).eq.2) THEN
+          ic_i = REACTION_C4_GRAIN_RANK(J)
+           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
+              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
+@@ -1462,8 +1460,7 @@ abCO(1:nb_grains) = 0.d0
+           ENDIF
+        ENDIF
+ 
+-       IF(REACTION_COMPOUNDS_NAMES(1,J) == "O          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "O       " &
+-         .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
++       IF(ER_PATTERN(J).eq.3) THEN
+          ic_i = REACTION_C4_GRAIN_RANK(J)
+           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
+              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J))*(1.0D+00-abCO(ic_i)/ab_lay(ic_i))
+@@ -1561,13 +1558,9 @@ abCO(1:nb_grains) = 0.d0
+     DIFFUSION_RATE_1(J)=THERMAL_HOPING_RATE(reactant_1_idx(J))
+     DIFFUSION_RATE_2(J)=THERMAL_HOPING_RATE(reactant_2_idx(J))
+ 
+-    ! --------- Check for JH,JH2, and JO
+-    if (REACTION_COMPOUNDS_NAMES(1,J)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(1,J)(1:1) == 'J') IMOD1=1
+-    if (REACTION_COMPOUNDS_NAMES(1,J)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(1,J)(1:1) == 'J') IMOD1=2
+-    if (REACTION_COMPOUNDS_NAMES(1,J)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(1,J)(1:1) == 'J') IMOD1=3
+-    if (REACTION_COMPOUNDS_NAMES(2,J)(4:11).EQ.'H       '.AND.REACTION_COMPOUNDS_NAMES(2,J)(1:1) == 'J') IMOD2=1
+-    if (REACTION_COMPOUNDS_NAMES(2,J)(4:11).EQ.'H2      '.AND.REACTION_COMPOUNDS_NAMES(2,J)(1:1) == 'J') IMOD2=2
+-    if (REACTION_COMPOUNDS_NAMES(2,J)(4:11).EQ.'O       '.AND.REACTION_COMPOUNDS_NAMES(2,J)(1:1) == 'J') IMOD2=3
++    ! --------- Check for JH,JH2, and JO (precomputed base classification)
++    IMOD1=IMOD1_BASE(J)
++    IMOD2=IMOD2_BASE(J)
+ 
+     ! --------- QM for JH,JH2 only - others are too heavy
+     if (IMOD1+IMOD2.NE.0) then
+@@ -1643,7 +1636,7 @@ abCO(1:nb_grains) = 0.d0
+                        EXP(-ACTIV)
+            prob_deso = EVAPORATION_RATES_TEMPO(reactant_1_idx(J)) + &
+                        EVAPORATION_RATES_TEMPO(reactant_2_idx(J))
+-           IF(ANY(REACTION_COMPOUNDS_NAMES(:,j)(1:1).eq.'K')) prob_deso = 0.0D+00
++           IF(HAS_MANTLE_COMPOUND(J)) prob_deso = 0.0D+00
+            prob_diff = (DIFFUSION_RATE_1(J) + DIFFUSION_RATE_2(J)) * nb_sites_per_grain(GRAIN_RANK(J))
+ 
+            barr = prob_reac+prob_deso+prob_diff
+@@ -1653,50 +1646,13 @@ abCO(1:nb_grains) = 0.d0
+     endif
+ 
+     ! Modified rate have sense only for surface species
+-    IF(any(REACTION_COMPOUNDS_NAMES(:,j)(1:1).eq."J")) THEN
++    IF(HAS_SURFACE_COMPOUND(J)) THEN
+ 
+-    ! --------- Modify according to MODIFY_RATE_FLAG switch:
++    ! --------- Modify according to MODIFY_RATE_FLAG switch (precomputed final
++    !           classification; MODIFY_RATE_FLAG is a run constant):
+     if (MODIFY_RATE_FLAG.NE.0) then
+-      ! ------------ if H+H->H2 is only modified rxn:
+-      if ((MODIFY_RATE_FLAG.EQ.-1).AND.(IMOD1.NE.1.OR.IMOD2.NE.1)) then
+-        IMOD1=0
+-        IMOD2=0
+-      endif
+-
+-      ! ------------ if only H is modified:
+-      if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD1.NE.1)) IMOD1=0
+-      if ((MODIFY_RATE_FLAG.EQ.1).AND.(IMOD2.NE.1)) IMOD2=0
+-
+-      ! ------------ Set to modify all rates, if selected (just atoms)
+-      if (MODIFY_RATE_FLAG.EQ.3) then
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'H       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'He      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'C       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'N       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'O       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'S       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Si      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Fe      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Na      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Mg      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'P       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'F       ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        if (REACTION_COMPOUNDS_NAMES(1,J)(4:11) .EQ. 'Cl      ' .AND. REACTION_COMPOUNDS_NAMES(1,J)(1:1) .EQ. 'J') IMOD1=3
+-        
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'H       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'He      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'C       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'N       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'O       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'S       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Si      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Fe      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Na      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Mg      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'P       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'F       ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-        if (REACTION_COMPOUNDS_NAMES(2,J)(4:11) .EQ. 'Cl      ' .AND. REACTION_COMPOUNDS_NAMES(2,J)(1:1) .EQ. 'J') IMOD2=3
+-      endif
++      IMOD1=IMOD1_FINAL(J)
++      IMOD2=IMOD2_FINAL(J)
+ 
+       ! ------------ Modify rates (DIFFUSION_RATE_1 & DIFFUSION_RATE_2) according to their own evap/acc rates
+       YMOD1=Y(reactant_1_idx(J))
+@@ -1712,20 +1668,18 @@ abCO(1:nb_grains) = 0.d0
+     
+     ! If the number of mantle layer is > 1, we consider that t(diff) (the time required by a species to 
+     ! scan the entire grain sites) is given by the Number of sites on a layer time the number of layer time t(hop)
+-    IF(any(REACTION_COMPOUNDS_NAMES(:,j)(1:1).eq."K").AND.sumlaymant(GRAIN_RANK(J)).gt.1.0d0) THEN
++    IF(HAS_MANTLE_COMPOUND(J).AND.sumlaymant(GRAIN_RANK(J)).gt.1.0d0) THEN
+       reaction_rates(J) = reaction_rates(J) / sumlaymant(GRAIN_RANK(J))
+     ENDIF
+ 
+-    ! H2 formation by LH mechanism is turned off when the ad hoc formation of H2 is activated
+-    IF ((reaction_compounds_names(1,J)(4:11).EQ.'H       ').AND.(reaction_compounds_names(2,J)(4:11).EQ.'H       ') &
+-       .AND. (reaction_compounds_names(1,J)(1:1).EQ.'J').AND.(reaction_compounds_names(2,J)(1:1).EQ.'J')) then
+-    ENDIF
++    ! H2 formation by LH mechanism is turned off when the ad hoc formation of H2
++    ! is activated (handled elsewhere; the former empty JH+JH guard here did
++    ! nothing and is removed).
+ 
+     ! "Encounter desorption" process for JH2 (Hincelin et al. 2014,A&A)
+     ! The reaction JH2+JH2->JH2+H2 must be in the grain_reactions.in file to be accounted
+     ! in practice the dominant processes are really the thermal hoping and thermal desorption of H2.
+-    if ((reaction_compounds_names(1,J)(4:11).EQ.'H2      ').AND.(reaction_compounds_names(2,J)(4:11).EQ.'H2      ') &
+-        .AND. (reaction_compounds_names(1,J)(1:1).EQ.'J') .AND. (reaction_compounds_names(2,J)(1:1).EQ.'J')) then
++    if (IS_H2H2_SURFACE(J)) then
+        PROBH2H2=EVAPORATION_RATES_TEMPO_H2(GRAIN_RANK(J))/(VIBRATION_FREQUENCY(reactant_1_idx(J))* &
+        EXP(-diff_binding_ratio_surf*ED_H2/actual_dust_temp(GRAIN_RANK(J)))/nb_sites_per_grain(GRAIN_RANK(J))+ &
+        EVAPORATION_RATES_TEMPO_H2(GRAIN_RANK(J)))
+-- 
+2.43.0
+

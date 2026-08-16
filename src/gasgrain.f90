@@ -124,9 +124,10 @@ call get_gas_surface_species()
 ! Initialization of elemental/chemical quantities
 call index_datas()
 
-! Coagulation kernel coefficients. MUST follow index_datas -> init_reaction_rates
-! (which sets chemistry rates and would otherwise leave/overwrite the coag slots).
-if (coagulation) call dust_coagulation_set_rates()
+! Coagulation kernel coefficients are set below, once the gas temperature is
+! available (the Brownian kernel needs it). They only need to precede the first
+! RHS evaluation; nothing between here and there uses the coag rate VALUES (the
+! reaction coupling that drives sparsity comes from the resolved compound IDs).
 
 ! Calculate the initial abundances for all elements that compose the species
 ! Here it is assumed that all the cells in 1D have the same elemental abundances
@@ -194,6 +195,11 @@ actual_gas_temp = gas_temperature
 actual_dust_temp(:) = dust_temperature(:)
 actual_av = visual_extinction
 actual_gas_density = H_number_density
+
+! Coagulation kernel coefficients (constant, or Brownian using the gas temperature
+! just set above). Must follow index_datas -> init_reaction_rates (which would
+! otherwise overwrite the coag slots) and precede the first RHS evaluation.
+if (coagulation) call dust_coagulation_set_rates()
 
 ! Write species name/index correspondance
 call write_species()
