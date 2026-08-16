@@ -165,7 +165,8 @@ subroutine dust_coagulation_inject_static()
   real(double_precision) :: w1, w2
   logical :: is_overflow
 
-  call coag_assert_ice_free()
+  ! (Rung 1's coag_assert_ice_free guard is lifted here: Rung 2 adds ice-transport
+  !  reactions, so an ice-bearing network is now supported rather than forbidden.)
   call coag_assert_type_unused()
 
   ns = 0
@@ -246,6 +247,25 @@ function coag_kernel(i, j) result(kern)
   implicit none
   integer, intent(in) :: i, j
   real(double_precision) :: kern
+  ! GRAIN coagulation rate: the bare kernel with the 1/2 self-pair factor on the
+  ! diagonal (the RHS double-depletes GRAIN_i in a self-reaction, so 1/2*K_ii*2 =
+  ! K_ii). Ice transport must NOT use this 1/2 (its reactants J_i X and GRAIN_j are
+  ! distinct, depleted once each), so it calls coag_kernel_bare directly.
+  kern = coag_kernel_bare(i, j)
+  if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once
+  return
+end function coag_kernel
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Bare coagulation kernel K_ij for the bin pair (i,j), WITHOUT the 1/2
+!! self-pair factor. Single source of truth for the kernel form. Grain reactions
+!! wrap this with the diagonal 1/2 (coag_kernel); ice-transport reactions use it
+!! as-is (full K_ii on the diagonal). Rung 1b adds the Brownian branch here.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function coag_kernel_bare(i, j) result(kern)
+  implicit none
+  integer, intent(in) :: i, j
+  real(double_precision) :: kern
   real(double_precision) :: ai, aj, mu
 
   select case (trim(coagulation_kernel))
@@ -270,9 +290,8 @@ function coag_kernel(i, j) result(kern)
       trim(coagulation_kernel), '" (v1 supports: constant, brownian).'
     call exit(31)
   end select
-  if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once
   return
-end function coag_kernel
+end function coag_kernel_bare
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @brief Runtime overflow guard. Returns the coagulation collision rate that the
