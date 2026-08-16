@@ -54,6 +54,10 @@ implicit none
 ! Tolerances for the geometric mass grid (mass_ratio ~ 2, well-separated bins).
 real(double_precision), parameter :: COAG_MASS_TOL = 1.d-9
 
+! Base ice species transported by coagulation (e.g. "CO" for J01CO..J0NCO), filled
+! by dust_ice_enumerate_bases from the expanded species list at injection time.
+character(len=11), allocatable :: ice_base_names(:)
+
 contains
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -114,7 +118,11 @@ subroutine dust_coagulation_count()
   real(double_precision) :: w1, w2
   logical :: is_overflow
 
-  nb_coagulation_reactions = 0
+  ! Grain reactions: one per UNORDERED non-overflow pair (i<=j). Also count the
+  ! ORDERED non-overflow pairs, which set the ice-transport reaction count once the
+  ! number of ice bases is known (in get_array_sizes, after read_species).
+  nb_coag_grain_reactions = 0
+  coag_n_ordered_nonoverflow = 0
   nover = 0
   do i = 1, nb_grains
     do j = i, nb_grains
@@ -122,10 +130,15 @@ subroutine dust_coagulation_count()
       if (is_overflow) then
         nover = nover + 1
       else
-        nb_coagulation_reactions = nb_coagulation_reactions + 1
+        nb_coag_grain_reactions = nb_coag_grain_reactions + 1
+        coag_n_ordered_nonoverflow = coag_n_ordered_nonoverflow + 1     ! (i,j)
+        if (i /= j) coag_n_ordered_nonoverflow = coag_n_ordered_nonoverflow + 1  ! (j,i)
       endif
     enddo
   enddo
+  ! Ice transport (nb_ice_transport_reactions) is added in get_array_sizes; here we
+  ! only fix the grain part of the total so the arrays can be sized.
+  nb_coagulation_reactions = nb_coag_grain_reactions
 
   coag_overflow_pairs_skipped = nover
   ! Store the skipped (i,j) so the runtime dropped-flux diagnostic can sum
@@ -146,8 +159,8 @@ subroutine dust_coagulation_count()
     enddo
   enddo
 
-  write(*,'(a,i0,a,i0,a)') ' (coagulation) generated ', nb_coagulation_reactions, &
-    ' pair reactions; ', coag_overflow_pairs_skipped, ' overflow pairs skipped (Rung 1 policy c).'
+  write(*,'(a,i0,a,i0,a)') ' (coagulation) generated ', nb_coag_grain_reactions, &
+    ' grain pair reactions; ', coag_overflow_pairs_skipped, ' overflow pairs skipped (policy c).'
   return
 end subroutine dust_coagulation_count
 
@@ -161,19 +174,19 @@ end subroutine dust_coagulation_count
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 subroutine dust_coagulation_inject_static()
   implicit none
-  integer :: i, j, k1, k2, slot, ns
+  integer :: i, j, k1, k2, slot, ns, b
   real(double_precision) :: w1, w2
   logical :: is_overflow
+  character(len=11) :: base
 
-  ! (Rung 1's coag_assert_ice_free guard is lifted here: Rung 2 adds ice-transport
-  !  reactions, so an ice-bearing network is now supported rather than forbidden.)
   call coag_assert_type_unused()
 
+  ! ---- (1) grain coagulation reactions: one per unordered non-overflow pair ----
   ns = 0
   do i = 1, nb_grains
     do j = i, nb_grains
       call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
-      if (is_overflow) cycle          ! Rung 1 policy (c): no reaction generated
+      if (is_overflow) cycle          ! policy (c): no reaction generated
       ns = ns + 1
       slot = nb_chemistry_reactions + ns
 
@@ -185,25 +198,103 @@ subroutine dust_coagulation_inject_static()
       REACTION_COMPOUNDS_NAMES(5, slot) = YGRAIN(k2)    ! product 2 (upper bin)
 
       REACTION_TYPE(slot) = COAGULATION_TYPE
-      ! Unique reaction ID (high base, clear of chemistry file IDs) so the
-      ! duplicate-ID preliminary test does not treat distinct coagulation pairs
-      ! as clashing entries of one reaction.
       REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
 
-      ! Podolak/Brauer split on the product weights; loss stays unweighted.
       REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
       REACTION_PRODUCT_WEIGHTS(4, slot) = w1
       REACTION_PRODUCT_WEIGHTS(5, slot) = w2
     enddo
   enddo
 
+  if (ns /= nb_coag_grain_reactions) then
+    write(error_unit,'(a,i0,a,i0)') 'Error (coagulation): filled ', ns, &
+      ' grain reactions but counted ', nb_coag_grain_reactions
+    call exit(31)
+  endif
+
+  ! ---- (2) ice-transport reactions: J_i X + GRAIN_j -> w1 J_k1 X + w2 J_k2 X + GRAIN_j
+  ! GRAIN_j is a weight-1 catalyst product (net-zero depletion, zero Jacobian row).
+  ! ORDERED pairs: (i,j) transports the ice on bin i, (j,i) transports the ice on bin
+  ! j -- both directions. i==j is one direction, and its full-K_ii rate (set later,
+  ! bare kernel) already accounts for both grains' ice. Same product weights (w1,w2)
+  ! as the grain reaction => ice follows the particle and is conserved by construction.
+  call dust_ice_enumerate_bases()
+  do b = 1, nb_ice_bases
+    base = ice_base_names(b)
+    do i = 1, nb_grains
+      do j = 1, nb_grains
+        call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+        if (is_overflow) cycle
+        ns = ns + 1
+        slot = nb_chemistry_reactions + ns
+
+        REACTION_COMPOUNDS_NAMES(:, slot) = ''
+        REACTION_COMPOUNDS_NAMES(1, slot) = ice_name(i,  base)   ! reactant: ice on bin i
+        REACTION_COMPOUNDS_NAMES(2, slot) = YGRAIN(j)            ! reactant: collision partner
+        REACTION_COMPOUNDS_NAMES(4, slot) = ice_name(k1, base)  ! product: ice -> bin k1
+        REACTION_COMPOUNDS_NAMES(5, slot) = ice_name(k2, base)  ! product: ice -> bin k2
+        REACTION_COMPOUNDS_NAMES(6, slot) = YGRAIN(j)            ! product: partner catalyst
+
+        REACTION_TYPE(slot) = COAGULATION_TYPE
+        REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
+
+        REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
+        REACTION_PRODUCT_WEIGHTS(4, slot) = w1                   ! ice split, same eps as grains
+        REACTION_PRODUCT_WEIGHTS(5, slot) = w2
+        REACTION_PRODUCT_WEIGHTS(6, slot) = 1.d0                 ! catalyst regenerated
+      enddo
+    enddo
+  enddo
+
   if (ns /= nb_coagulation_reactions) then
     write(error_unit,'(a,i0,a,i0)') 'Error (coagulation): filled ', ns, &
-      ' reactions but counted ', nb_coagulation_reactions
+      ' coag+ice reactions but counted ', nb_coagulation_reactions
     call exit(31)
   endif
   return
 end subroutine dust_coagulation_inject_static
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Per-bin ice species name for base X on bin k: "J" // kk // X.
+!! Mirrors read_species' expansion of a base surface species JX into J01X..J0NX.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function ice_name(k, base) result(nm)
+  implicit none
+  integer, intent(in) :: k
+  character(len=*), intent(in) :: base
+  character(len=11) :: nm
+  character(len=2)  :: kc
+  write(kc,'(I2.2)') k
+  nm = 'J'//kc//trim(base)
+  return
+end function ice_name
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Enumerate the base ice species from the expanded species list. Each ice
+!! species X has a bin-1 form "J01X" in species_name; its base is the remainder
+!! after "J01". Fills ice_base_names and checks the count against nb_ice_bases
+!! (= number of base surface species from get_array_sizes). 2-phase (J) only in v1.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine dust_ice_enumerate_bases()
+  implicit none
+  integer :: s, nb
+  if (allocated(ice_base_names)) deallocate(ice_base_names)
+  allocate(ice_base_names(max(nb_ice_bases,1)))
+  ice_base_names = ''
+  nb = 0
+  do s = 1, nb_species
+    if (species_name(s)(1:3) == 'J01') then
+      nb = nb + 1
+      if (nb <= nb_ice_bases) ice_base_names(nb) = trim(species_name(s)(4:))
+    endif
+  enddo
+  if (nb /= nb_ice_bases) then
+    write(error_unit,'(a,i0,a,i0)') 'Error (coagulation/ice): enumerated ', nb, &
+      ' ice bases (J01*) but get_array_sizes counted ', nb_ice_bases
+    call exit(31)
+  endif
+  return
+end subroutine dust_ice_enumerate_bases
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @brief Set the coagulation rate coefficients (the kernel, with the diagonal
@@ -213,7 +304,7 @@ end subroutine dust_coagulation_inject_static
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 subroutine dust_coagulation_set_rates()
   implicit none
-  integer :: i, j, k1, k2, slot, ns
+  integer :: i, j, k1, k2, slot, ns, b
   real(double_precision) :: w1, w2
   logical :: is_overflow
 
@@ -222,6 +313,7 @@ subroutine dust_coagulation_set_rates()
     call exit(31)
   endif
 
+  ! (1) grain reactions: kernel with the 1/2 self-pair factor (coag_kernel).
   ns = 0
   do i = 1, nb_grains
     do j = i, nb_grains
@@ -230,6 +322,21 @@ subroutine dust_coagulation_set_rates()
       ns = ns + 1
       slot = nb_chemistry_reactions + ns
       reaction_rates(slot) = coag_kernel(i, j)
+    enddo
+  enddo
+
+  ! (2) ice-transport reactions: BARE kernel (full K_ii on the diagonal). Same
+  ! ordered-pair iteration as the injection so slots line up. Rate is independent of
+  ! which ice base, so we just replay the pair loop nb_ice_bases times.
+  do b = 1, nb_ice_bases
+    do i = 1, nb_grains
+      do j = 1, nb_grains
+        call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+        if (is_overflow) cycle
+        ns = ns + 1
+        slot = nb_chemistry_reactions + ns
+        reaction_rates(slot) = coag_kernel_bare(i, j)
+      enddo
     enddo
   enddo
   return

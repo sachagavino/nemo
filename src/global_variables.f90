@@ -42,7 +42,11 @@ logical                  :: coagulation = .false.          !< master switch (par
 character(len=20)        :: coagulation_kernel = 'constant' !< 'constant' (Rung 1) | 'brownian' (Rung 1b)
 real(double_precision)   :: constant_kernel_k0 = 0.d0       !< [cm^3/s] constant kernel K0 for validation
 integer                  :: nb_chemistry_reactions = 0      !< reactions before coagulation is appended
-integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions
+integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions (grain + ice transport)
+integer                  :: nb_coag_grain_reactions = 0     !< grain coagulation reactions (non-overflow unordered pairs)
+integer                  :: nb_ice_transport_reactions = 0  !< ice-transport reactions (ordered non-overflow pairs x ice bases)
+integer                  :: coag_n_ordered_nonoverflow = 0  !< number of ORDERED non-overflow pairs (i,j), i,j=1..N
+integer                  :: nb_ice_bases = 0                 !< number of base ice species transported by coagulation
 integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
 integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
 real(double_precision)   :: coag_dropped_flux = 0.d0 !< runtime coagulation collision rate dropped by the top-bin policy
@@ -679,11 +683,18 @@ close(902)
 nb_species = nb_species_for_gas + nb_species_for_grain ! The total number of species, sum of species in gas and grain
 nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number of reactions, sum of species in gas and grain
 
-! Coagulation reactions are appended as a contiguous terminal block. Their count
-! is computed in dust_coagulation_count() (called from init_gasgrain right after
-! the grid is built, BEFORE this routine) and merely added here, so the reaction
-! arrays are allocated large enough. nb_coagulation_reactions is 0 when
-! coagulation is off, keeping nb_reactions -- and the whole build -- unchanged.
+! Coagulation reactions are appended as a contiguous terminal block. The grain part
+! (nb_coag_grain_reactions) and the ORDERED non-overflow pair count were computed in
+! dust_coagulation_count() before this routine. Ice transport adds, per ice base
+! species, one reaction per ordered non-overflow pair; the ice-base count is only
+! known now (t_nb_species_for_grain = number of base surface species, all J ice in
+! 2-phase v1). nb_coagulation_reactions is 0 when coagulation is off, keeping
+! nb_reactions -- and the whole build -- unchanged.
+if (coagulation) then
+  nb_ice_bases = t_nb_species_for_grain
+  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases
+  nb_coagulation_reactions = nb_coag_grain_reactions + nb_ice_transport_reactions
+endif
 nb_chemistry_reactions = nb_reactions
 nb_reactions = nb_reactions + nb_coagulation_reactions
 
