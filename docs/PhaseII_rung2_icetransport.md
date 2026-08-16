@@ -28,6 +28,17 @@ when grains coagulate, and nothing else happens to it. This isolates the transpo
 mechanism so its conservation can be validated against a known answer before
 chemistry complicates it.
 
+**How "inert ice" is realized — extend the Rung-1 dust-only fixture, do NOT disable
+chemistry in a full network.** Rung 1 established a chemistry-free minimal fixture
+(grains-only species, empty reaction/surface files). Rung 2 extends *that* fixture
+with a small set of inert ice species and the coagulation + ice-transport reactions —
+nothing else. The ice is inert *by construction* (the fixture contains no adsorption,
+desorption, or surface reactions), not by toggling flags. (In a full network,
+`is_grain_reactions=0` would suppress adsorption and surface reactions, but there is
+no flag to disable gas-phase reactions, and gas-phase reactions never write to the
+`J_k X` ice species anyway. The fixture path avoids the question entirely and is
+consistent with Rung 1.)
+
 **Grid:** start on a 3-bin toy (cheap, hand-checkable), as the brief specifies. Scale
 to the fiducial grid only after the toy conserves.
 
@@ -108,6 +119,29 @@ near-empty bin), WARN — do not hard-cap. In 2-phase (v1) there is no strict mo
 ceiling (all ice is "surface", multilayers allowed), so the guard flags gross
 implausibility, not theta > 1. The default (area-weighted) path cannot trigger this
 and needs no guard.
+
+**Fixture scaffolding — confirm empirically before building.** For the fixture to hold
+ice at all it needs three things, and one of them is a potential snag:
+  1. **Ice species defined** in the species list (`J_k X` for each ice species X and
+     each bin k), with their properties (mass, and whatever surface parameters the
+     placement needs). Defining a species is bookkeeping, NOT chemistry — a defined
+     `J_k CO` with no reactions touching it is exactly the inert ice this rung wants.
+  2. **Initial abundances**, which the executor writes into the fixture's
+     `abundances.in` — one total per ice species. Choose SIMPLE, hand-traceable values
+     for testability, not realism (e.g. CO total = 1e-4 per H, well above the floor).
+     CO alone suffices for the conservation gate; add a second species only to confirm
+     independent handling. For the hand-check (diagnostic b), a tabulated override
+     placing all the ice on one bin makes the post-collision split a clean fraction to
+     verify by arithmetic. The specific numbers are the executor's call (same as K0 and
+     the monodisperse IC in Rung 1) — chosen to make each gate unambiguous.
+  3. **Surface-structure parameters** — the coverage guard computes theta_k =
+     X_k / sites_k, so it needs sites-per-bin (and area-per-bin, which the grid already
+     provides). In the full code these ride along with the surface-chemistry setup that
+     the fixture strips out. **Confirm empirically** (drive the initializer crash-by-
+     crash, as in Rung 1) what surface scaffolding the ice-placement and coverage-guard
+     paths require in a chemistry-free fixture. If sites-per-bin is not available
+     without the chemistry setup, source it from the grid parameters directly. Flag
+     back to the design thread if this turns out to need more than the grid provides.
 
 ---
 
