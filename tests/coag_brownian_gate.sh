@@ -28,7 +28,7 @@ RUN="$(mktemp -d)"
 trap 'rm -rf "$RUN"' EXIT
 cp tests/fixture_dust_coag/*.in "$RUN"/
 # Brownian kernel, monodisperse IC, early first outputs so the initial slope is clean.
-sed -i 's/^coagulation_kernel = constant/coagulation_kernel = brownian/; s/^dust_ic = MRN/dust_ic = monodisperse/; s/^start_time = .*/start_time =  1.000E-01/; s/^stop_time = .*/stop_time =  5.000E+03/; s/^nb_outputs = .*/nb_outputs = 25/' "$RUN"/parameters.in
+sed 's/^coagulation_kernel = constant/coagulation_kernel = brownian/; s/^dust_ic = MRN/dust_ic = monodisperse/; s/^start_time = .*/start_time =  1.000E-01/; s/^stop_time = .*/stop_time =  5.000E+03/; s/^nb_outputs = .*/nb_outputs = 25/' "$RUN"/parameters.in > "$RUN"/parameters.in.tmp && mv "$RUN"/parameters.in.tmp "$RUN"/parameters.in
 
 echo "[coag_brownian_gate] running in $RUN ..."
 ( cd "$RUN" && "$ROOT/bin/nmgc" run >run.log 2>&1 )

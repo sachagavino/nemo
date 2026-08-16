@@ -25,7 +25,7 @@ gfortran -O0 build/coag_kernel_check.o $OBJS -o bin/coag_kernel_check 2>>/tmp/ck
 RUNDIR="$(mktemp -d)"
 trap 'rm -rf "$RUNDIR"' EXIT
 cp tests/fixture_dust_coag/*.in "$RUNDIR"/
-sed -i 's/^coagulation_kernel = constant/coagulation_kernel = brownian/' "$RUNDIR"/parameters.in
+sed 's/^coagulation_kernel = constant/coagulation_kernel = brownian/' "$RUNDIR"/parameters.in > "$RUNDIR"/parameters.in.tmp && mv "$RUNDIR"/parameters.in.tmp "$RUNDIR"/parameters.in
 
 echo "[coag_kernel_check] running in $RUNDIR ..."
 ( cd "$RUNDIR" && "$ROOT/bin/coag_kernel_check" ) | tee /tmp/ckc_run.log

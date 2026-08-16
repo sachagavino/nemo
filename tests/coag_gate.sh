@@ -27,7 +27,7 @@ RUN="$(mktemp -d)"
 trap 'rm -rf "$RUN"' EXIT
 cp tests/fixture_dust_coag/*.in "$RUN"/
 # Monodisperse IC + a window that spans the analytic knee (~2e3 yr for this grid/K0).
-sed -i 's/^dust_ic = MRN/dust_ic = monodisperse/; s/^stop_time = .*/stop_time =  2.000E+03/; s/^nb_outputs = .*/nb_outputs = 25/' "$RUN"/parameters.in
+sed 's/^dust_ic = MRN/dust_ic = monodisperse/; s/^stop_time = .*/stop_time =  2.000E+03/; s/^nb_outputs = .*/nb_outputs = 25/' "$RUN"/parameters.in > "$RUN"/parameters.in.tmp && mv "$RUN"/parameters.in.tmp "$RUN"/parameters.in
 
 echo "[coag_gate] running in $RUN ..."
 ( cd "$RUN" && "$ROOT/bin/nmgc" run >run.log 2>&1 )
