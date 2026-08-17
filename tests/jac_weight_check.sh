@@ -29,9 +29,13 @@ gfortran -O0 build/jac_weight_check.o $OBJS -o bin/jac_weight_check 2>>/tmp/jwc_
 
 RUNDIR="$(mktemp -d)"
 trap 'rm -rf "$RUNDIR"' EXIT
-cp inputs/*.in "$RUNDIR"/ 2>/dev/null || { echo "no inputs/*.in to seed the run"; exit 3; }
+# Optional first arg: input directory to stage (default: the full network in inputs/).
+# Pass a coagulation fixture (e.g. tests/fixture_ice_transport) to exercise the
+# grain- and ice-transport product-weight plumbing into get_jacobian.
+INPUTS_DIR="${1:-inputs}"
+cp "$INPUTS_DIR"/*.in "$RUNDIR"/ 2>/dev/null || { echo "no $INPUTS_DIR/*.in to seed the run"; exit 3; }
 
-echo "[jac_weight_check] running in $RUNDIR ..."
+echo "[jac_weight_check] running in $RUNDIR (inputs: $INPUTS_DIR) ..."
 ( cd "$RUNDIR" && "$ROOT/bin/jac_weight_check" ) | tee /tmp/jwc_run.log
 grep -q "RESULT: PASS" /tmp/jwc_run.log
 echo "[jac_weight_check] PASS"
