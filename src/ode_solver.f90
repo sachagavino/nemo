@@ -255,7 +255,12 @@ if (.not.allocated(JA_SYM)) allocate(JA_SYM(ncoup))
 jj = 0
 c_prev = 0
 do m=1,ncoup
-  if (m.gt.1 .and. keys(m).eq.keys(m-1)) cycle
+  ! NB: Fortran .and. does not short-circuit, so the duplicate test must be nested to
+  ! avoid evaluating keys(m-1) = keys(0) at m=1 (a real OOB that -O2 tolerates but
+  ! -O0/macOS/bounds-checking faults on).
+  if (m.gt.1) then
+    if (keys(m).eq.keys(m-1)) cycle
+  endif
   jcol = int(keys(m)/N1)
   irow = int(keys(m) - int(jcol,8)*N1)
   if (jcol.ne.c_prev) then

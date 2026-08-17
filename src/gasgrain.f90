@@ -486,18 +486,20 @@ do I=0,MAX_NUMBER_REACTION_TYPE-1
   enddo
 enddo
 
-! In a chemistry-free (coagulation-only) network every gas/grain reaction type is
-! absent, and the scan leaves it (start,stop)=(0,0). The many rate loops of the
-! form `do J=type_id_start(T),type_id_stop(T)` would then run once at J=0 and index
-! the reaction arrays out of bounds. Turn each absent range into the empty do-loop
-! range [1,0] so those loops iterate zero times. Guarded by `coagulation`, so the
-! default build is byte-identical; the tiling validator below keys on stop==0 and
+! Absent reaction types leave the scan at (start,stop)=(0,0). The many rate loops of
+! the form `do J=type_id_start(T),type_id_stop(T)` (e.g. the type-97 Bron et al. block
+! in set_dependant_rates) would then run once at J=0 and index the reaction arrays
+! (RATE_C, RATE_A, reaction_rates, ...) out of bounds -- undefined behaviour that -O2
+! on Linux happens to tolerate (index 0 aliases harmless adjacent memory) but that
+! faults on macOS. Turn each absent range into the empty do-loop range [1,0] so those
+! loops iterate zero times. Applies to every network (a chemistry-free coagulation
+! grid, or a full network missing a looped type); the J=0 iteration only ever wrote
+! the out-of-bounds slot 0, never a real rate, so removing it is byte-identical on the
+! reaction arrays 1..nb_reactions. The tiling validator below keys on stop==0 and
 ! treats [1,0] and [0,0] identically as "type not defined".
-if (coagulation) then
-  do I=0,MAX_NUMBER_REACTION_TYPE-1
-    if (type_id_stop(I).eq.0) type_id_start(I)=1
-  enddo
-endif
+do I=0,MAX_NUMBER_REACTION_TYPE-1
+  if (type_id_stop(I).eq.0) type_id_start(I)=1
+enddo
 
 ! Find the index of CO, H2, H, He and grain0 PLUS H2O and a few other contained in folder cross-sections.
 do i=1,nb_species

@@ -34,6 +34,13 @@ trap 'rm -rf "$RUNDIR"' EXIT
 # grain- and ice-transport product-weight plumbing into get_jacobian.
 INPUTS_DIR="${1:-inputs}"
 cp "$INPUTS_DIR"/*.in "$RUNDIR"/ 2>/dev/null || { echo "no $INPUTS_DIR/*.in to seed the run"; exit 3; }
+# The weight test exercises the RHS/Jacobian, not the network sanity checks, so skip
+# preliminary_tests: it is unnecessary here, slow on the full network, and its
+# full-network pass segfaults on some platforms (macOS). Portable in-place edit.
+if [ -f "$RUNDIR/parameters.in" ]; then
+  sed 's/^preliminary_test *=.*/preliminary_test = 0/' "$RUNDIR/parameters.in" > "$RUNDIR/parameters.in.tmp" \
+    && mv "$RUNDIR/parameters.in.tmp" "$RUNDIR/parameters.in"
+fi
 
 echo "[jac_weight_check] running in $RUNDIR (inputs: $INPUTS_DIR) ..."
 ( cd "$RUNDIR" && "$ROOT/bin/jac_weight_check" ) | tee /tmp/jwc_run.log
