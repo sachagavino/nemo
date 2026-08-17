@@ -166,6 +166,11 @@ do i=1,nb_grains
   abundances(INDGRAIN_MINUS(i)) = 0.d0
 enddo
 
+! Place the deferred base-ice totals onto the grid (area-weighted default, or a
+! per-species override), now that the grain populations n_k and nb_sites_per_grain
+! are available. Off unless coagulation is on and abundances.in gave a base-ice total.
+if (coagulation .and. nb_ice_ic > 0) call dust_ice_place()
+
 !Compute the initial abundance of electrons
 ! this is particularly needed for 1D simulations since the subroutine check_conservation is not done in 1D
 

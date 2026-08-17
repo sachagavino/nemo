@@ -1742,7 +1742,15 @@ if (isDefined) then
   close(10)
 endif
 
-! We check if all species in abundances.in exists in the simulation
+! We check if all species in abundances.in exists in the simulation. A base-ice
+! total (e.g. "JCO" giving the TOTAL surface CO) is not itself a per-bin species;
+! when coagulation is on and its per-bin form J01<base> exists, it is DEFERRED to
+! dust_ice_place, which distributes it across J01<base>..J0N<base>.
+if (allocated(ice_ic_base_names)) deallocate(ice_ic_base_names)
+if (allocated(ice_ic_totals))    deallocate(ice_ic_totals)
+allocate(ice_ic_base_names(max(nb_lines,1)), ice_ic_totals(max(nb_lines,1)))
+ice_ic_base_names = ''; ice_ic_totals = 0.d0
+nb_ice_ic = 0
 do j=1,nb_lines
   error = 1
   do i=1,nb_species
@@ -1750,7 +1758,21 @@ do j=1,nb_lines
       error = 0 ! The species exist
     endif
   enddo
-  
+
+  if (error.eq.1) then
+    ! deferred base-ice total?  name is "J<base>" (or K) and "J01<base>" is a species
+    if (coagulation .and. (temp_names(j)(1:1).eq.'J' .or. temp_names(j)(1:1).eq.'K')) then
+      do i=1,nb_species
+        if (species_name(i) .eq. (temp_names(j)(1:1)//'01'//trim(temp_names(j)(2:)))) error = 0
+      enddo
+      if (error.eq.0) then
+        nb_ice_ic = nb_ice_ic + 1
+        ice_ic_base_names(nb_ice_ic) = temp_names(j)(2:)          ! base (strip J/K prefix)
+        ice_ic_totals(nb_ice_ic)     = temp_abundances(j)
+      endif
+    endif
+  endif
+
   if (error.eq.1) then
     write(*,*) j
     write(*,*) temp_names

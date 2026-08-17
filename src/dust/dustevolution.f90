@@ -54,6 +54,11 @@ implicit none
 ! Tolerances for the geometric mass grid (mass_ratio ~ 2, well-separated bins).
 real(double_precision), parameter :: COAG_MASS_TOL = 1.d-9
 
+! Coverage above which the override-path ice IC warns of gross implausibility (e.g.
+! a user dumping ice onto a near-empty bin). 2-phase allows multilayers, so this is
+! well above 1 monolayer -- it flags nonsense, it does not cap.
+real(double_precision), parameter :: COAG_ICE_COVERAGE_WARN = 1.0d2
+
 ! Base ice species transported by coagulation (e.g. "CO" for J01CO..J0NCO), filled
 ! by dust_ice_enumerate_bases from the expanded species list at injection time.
 character(len=11), allocatable :: ice_base_names(:)
@@ -430,6 +435,140 @@ subroutine dust_coagulation_flux_diag(dropped, total)
   enddo
   return
 end subroutine dust_coagulation_flux_diag
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+! Ice initial-condition placement.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Distribute each deferred base-ice total (from read_abundances) across the
+!! per-bin ice species. DEFAULT is area-weighted, X_k = X_tot * n_k a_k^2 / sum_j
+!! n_j a_j^2, giving ~uniform initial monolayer coverage (ice coats surface). An
+!! optional surface_ice_distribution.in overrides the WHERE (per-bin fractions) for
+!! named species only; the total always comes from abundances.in. Must run after the
+!! grain abundances (n_k) and nb_sites_per_grain (from index_datas) are set.
+subroutine dust_ice_place()
+  implicit none
+  integer :: b, k, idx
+  character(len=11) :: base
+  real(double_precision) :: total, Xk, theta, nk
+  real(double_precision), dimension(nb_grains) :: frac
+  logical :: has_override
+
+  do b = 1, nb_ice_ic
+    base  = ice_ic_base_names(b)
+    total = ice_ic_totals(b)
+
+    call dust_ice_fractions(base, frac, has_override)   ! frac sums to 1
+
+    do k = 1, nb_grains
+      Xk  = total * frac(k)
+      idx = species_index(ice_name(k, base))
+      if (idx > 0) abundances(idx) = Xk
+
+      ! coverage guard: only on the override path (the default cannot pile ice on a
+      ! near-empty bin by construction). theta = molecules-per-grain / sites-per-grain.
+      if (has_override) then
+        nk = abundances(INDGRAIN(k))
+        if (nk > 0.d0 .and. nb_sites_per_grain(k) > 0.d0) then
+          theta = Xk / (nk * nb_sites_per_grain(k))
+          if (theta > COAG_ICE_COVERAGE_WARN) then
+            write(error_unit,'(a,a,a,i0,a,es9.2,a)') ' Warning (ice IC): override put species J', &
+              trim(base), ' on bin ', k, ' at coverage theta = ', theta, &
+              ' monolayers -- physically implausible (not capped).'
+          endif
+        endif
+      endif
+    enddo
+  enddo
+  return
+end subroutine dust_ice_place
+
+!> @brief Per-bin distribution fractions for base ice species. Area-weighted unless
+!! surface_ice_distribution.in supplies an override for this species.
+subroutine dust_ice_fractions(base, frac, has_override)
+  implicit none
+  character(len=*), intent(in) :: base
+  real(double_precision), intent(out) :: frac(nb_grains)
+  logical, intent(out) :: has_override
+  integer :: k
+  real(double_precision) :: denom
+
+  call dust_ice_read_override(base, frac, has_override)
+  if (has_override) return
+
+  ! area-weighted default: proportional to bin surface area n_k a_k^2
+  denom = 0.d0
+  do k = 1, nb_grains
+    denom = denom + abundances(INDGRAIN(k)) * grain_radii(k)**2
+  enddo
+  if (denom <= 0.d0) then
+    frac = 1.d0 / dble(nb_grains)      ! degenerate (no grains): spread evenly
+  else
+    do k = 1, nb_grains
+      frac(k) = abundances(INDGRAIN(k)) * grain_radii(k)**2 / denom
+    enddo
+  endif
+  return
+end subroutine dust_ice_fractions
+
+!> @brief Read per-bin override fractions for a species from surface_ice_distribution.in
+!! (format: "<base> f1 f2 ... fN"). has_override=.false. if the file is absent or has
+!! no line for this species. Fractions summing to /= 1 are renormalised with a warning.
+subroutine dust_ice_read_override(base, frac, has_override)
+  implicit none
+  character(len=*), intent(in) :: base
+  real(double_precision), intent(out) :: frac(nb_grains)
+  logical, intent(out) :: has_override
+  character(len=200) :: line
+  character(len=11) :: nm
+  integer :: k, ios
+  real(double_precision) :: s
+  logical :: isDefined
+
+  has_override = .false.
+  frac = 0.d0
+  inquire(file='surface_ice_distribution.in', exist=isDefined)
+  if (.not. isDefined) return
+
+  open(47, file='surface_ice_distribution.in', status='old', action='read')
+  do
+    read(47, '(a)', iostat=ios) line
+    if (ios /= 0) exit
+    if (len_trim(line) == 0) cycle
+    if (line(1:1) == '!') cycle
+    read(line, *, iostat=ios) nm, (frac(k), k=1,nb_grains)
+    if (ios /= 0) cycle
+    if (trim(nm) == trim(base)) then
+      has_override = .true.
+      exit
+    endif
+  enddo
+  close(47)
+  if (.not. has_override) then
+    frac = 0.d0
+    return
+  endif
+
+  s = sum(frac(1:nb_grains))
+  if (abs(s - 1.d0) > 1.d-6) then
+    write(error_unit,'(a,a,a,es12.5,a)') ' Warning (ice IC): override fractions for J', &
+      trim(base), ' sum to ', s, ' (not 1); renormalising.'
+    if (s > 0.d0) frac = frac / s
+  endif
+  return
+end subroutine dust_ice_read_override
+
+!> @brief Species index for a name, or 0 if absent.
+integer function species_index(nm) result(idx)
+  implicit none
+  character(len=*), intent(in) :: nm
+  integer :: s
+  idx = 0
+  do s = 1, nb_species
+    if (species_name(s) == nm) then
+      idx = s; return
+    endif
+  enddo
+end function species_index
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 ! Guards.

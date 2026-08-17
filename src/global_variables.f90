@@ -47,6 +47,13 @@ integer                  :: nb_coag_grain_reactions = 0     !< grain coagulation
 integer                  :: nb_ice_transport_reactions = 0  !< ice-transport reactions (ordered non-overflow pairs x ice bases)
 integer                  :: coag_n_ordered_nonoverflow = 0  !< number of ORDERED non-overflow pairs (i,j), i,j=1..N
 integer                  :: nb_ice_bases = 0                 !< number of base ice species transported by coagulation
+
+! Base-ice initial totals deferred from read_abundances: a user gives a single total
+! per ice species under the base name (e.g. "JCO = 1e-4"); dust_ice_place distributes
+! it across the per-bin species J01CO..J0NCO (area-weighted, or overridden).
+integer                  :: nb_ice_ic = 0
+character(len=11), allocatable, dimension(:) :: ice_ic_base_names !< base name, e.g. "CO"
+real(double_precision), allocatable, dimension(:) :: ice_ic_totals !< total abundance per H
 integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
 integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
 real(double_precision)   :: coag_dropped_flux = 0.d0 !< runtime coagulation collision rate dropped by the top-bin policy
