@@ -606,7 +606,7 @@ real(double_precision) :: w1, w2, w3, w4, w5 ! per-product gain weights (compoun
   character(2) :: c_i
 
 
-call set_dependant_rates(y)
+if (.not. freeze_dependent_rates) call set_dependant_rates(y)
 
 ! do j=1,nb_reactions
 ! write(*,*) reaction_rates(j),j,REACTION_TYPE(j)
@@ -698,7 +698,7 @@ ENDDO
 
 rate_tot(:) = rate_tot_acc(:) + rate_tot_des(:)
 
-call set_dependant_rates_3phase(Y)
+if (.not. freeze_dependent_rates) call set_dependant_rates_3phase(Y)
 
 do i=type_id_start(40),type_id_stop(40)
   reactant1_idx = REACTION_COMPOUNDS_ID(1, i)

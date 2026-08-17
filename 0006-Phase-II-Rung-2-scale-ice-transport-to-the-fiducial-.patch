@@ -1,0 +1,268 @@
+From 066f1029a7ab6e8db67e456cab9633f27744b78b Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Mon, 17 Aug 2026 01:12:58 +0000
+Subject: [PATCH 6/6] Phase II Rung 2: scale ice transport to the fiducial grid
+
+Proves the ice-transport generation on the fiducial 16-bin grid with several ice
+species, after the small new logic was validated on the 3-bin toy.
+
+- tests/fixture_ice_fiducial/: 16-bin mass-doubling grid (a_min 1e-6, a_max 3.2e-5),
+  4 prime elements (H,He,C,O), three inert ice species JCO/JH2O/JCO2 given as base
+  totals in abundances.in (exercising the area-weighted IC on a real grid).
+- The injector now reports the term-count breakdown; on this fixture:
+  120 grain + 675 ice-transport (225 ordered non-overflow pairs x 3 species) = 795.
+  Ice transport is O(N^2 N_ice): extrapolating to the reduced network's N_ice ~ tens
+  gives ~1e4, the tractable regime the brief requires (not ~1e5).
+- tests/coag_ice_scale.sh gates it: total ice sum_k Y(J_k X) conserved to 1.4e-16
+  for EACH of the three species independently (transport is per-base, never mixing
+  species), and the term count stays < 1e5. PASS.
+
+coag-OFF byte-identical (jac_weight_check 13450, worst reldiff 1.8006e-3).
+
+Rung 2 is complete and locked: ice rides its grains through coagulation with the
+corrected encoding (catalyst partner, bare K_ii, ice-follows-particle same-eps),
+conserving each species to machine precision, with the initial ice placed
+area-weighted by default (or per-species override with a coverage guard). Full gate
+set: (a) conservation, dust-mass, ice rate, (b) eps-split hand-check, (d) IC
+round-trip+shape+coverage, jacobian weight-plumbing on ice deposits, and fiducial
+scaling -- all green, coag-OFF byte-identical throughout.
+---
+ src/dust/dustevolution.f90                    |  3 +
+ tests/coag_ice_scale.sh                       | 73 +++++++++++++++++++
+ tests/fixture_ice_fiducial/abundances.in      |  6 ++
+ .../activation_energies.in                    |  0
+ tests/fixture_ice_fiducial/element.in         |  5 ++
+ tests/fixture_ice_fiducial/gas_reactions.in   |  0
+ tests/fixture_ice_fiducial/gas_species.in     |  8 ++
+ tests/fixture_ice_fiducial/grain_reactions.in |  0
+ tests/fixture_ice_fiducial/grain_species.in   |  3 +
+ tests/fixture_ice_fiducial/parameters.in      | 56 ++++++++++++++
+ .../surface_parameters.in                     |  0
+ 11 files changed, 154 insertions(+)
+ create mode 100755 tests/coag_ice_scale.sh
+ create mode 100644 tests/fixture_ice_fiducial/abundances.in
+ create mode 100644 tests/fixture_ice_fiducial/activation_energies.in
+ create mode 100644 tests/fixture_ice_fiducial/element.in
+ create mode 100644 tests/fixture_ice_fiducial/gas_reactions.in
+ create mode 100644 tests/fixture_ice_fiducial/gas_species.in
+ create mode 100644 tests/fixture_ice_fiducial/grain_reactions.in
+ create mode 100644 tests/fixture_ice_fiducial/grain_species.in
+ create mode 100644 tests/fixture_ice_fiducial/parameters.in
+ create mode 100644 tests/fixture_ice_fiducial/surface_parameters.in
+
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index 26dd06d..b181be3 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -256,6 +256,9 @@ subroutine dust_coagulation_inject_static()
+       ' coag+ice reactions but counted ', nb_coagulation_reactions
+     call exit(31)
+   endif
++  write(*,'(a,i0,a,i0,a,i0,a,i0,a)') ' (coagulation) reactions: ', nb_coag_grain_reactions, &
++    ' grain + ', nb_ice_transport_reactions, ' ice-transport (', nb_ice_bases, &
++    ' ice species) = ', nb_coagulation_reactions, ' total.'
+   return
+ end subroutine dust_coagulation_inject_static
+ 
+diff --git a/tests/coag_ice_scale.sh b/tests/coag_ice_scale.sh
+new file mode 100755
+index 0000000..3027f37
+--- /dev/null
++++ b/tests/coag_ice_scale.sh
+@@ -0,0 +1,73 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_ice_scale.sh
++#
++# Scaling check for ice transport on the fiducial grid (16 bins, several ice
++# species). Confirms:
++#   * gate (a) total ice sum_k Y(J_k X) conserved to machine precision for EACH ice
++#     species (transport is per-base and must not mix species);
++#   * the term count stays tractable -- ice transport is O(N^2 N_ice); for the reduced
++#     network (N_ice ~ tens) it must be ~1e4, not ~1e5. Printed by the injector.
++#
++# Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++
++echo "[coag_ice_scale] building (-O0)..."
++make OPT=-O0 >/dev/null 2>&1
++
++RUN="$(mktemp -d)"; trap 'rm -rf "$RUN"' EXIT
++cp tests/fixture_ice_fiducial/*.in "$RUN"/
++echo "[coag_ice_scale] running 16-bin fiducial (3 ice species) in $RUN ..."
++( cd "$RUN" && "$ROOT/bin/nmgc" run > run.log 2>&1 )
++grep "reactions:" "$RUN"/run.log | sed 's/^/   /' || true
++
++python3 - "$RUN" <<'PYEOF'
++import sys, struct, re, collections
++RUN = sys.argv[1]
++names = {}
++for line in open(RUN+"/species.out"):
++    for m in re.finditer(r"(\d+)\)\s+(\S+)", line): names[int(m.group(1))] = m.group(2)
++nb = max(names)
++bases = collections.defaultdict(list)
++for i,nm in names.items():
++    mm = re.match(r"^J\d\d(.+)$", nm)
++    if mm: bases[mm.group(1)].append(i)
++
++data = open(RUN+"/abundances.out","rb").read(); pos = 0
++def rec(d,p):
++    (n,)=struct.unpack_from("<i",d,p); p+=4; pl=d[p:p+n]; p+=n
++    (n2,)=struct.unpack_from("<i",d,p); p+=4; return pl,p
++outs=[]
++while pos < len(data):
++    _,pos=rec(data,pos); _,pos=rec(data,pos); ap,pos=rec(data,pos)
++    outs.append(struct.unpack("<%dd"%nb,ap))
++
++# term count from the injector line
++rc_line = [l for l in open(RUN+"/run.log") if "reactions:" in l]
++n_total = None
++if rc_line:
++    m = re.search(r"=\s*(\d+)\s*total", rc_line[0]); n_total = int(m.group(1)) if m else None
++
++print("=================================================================")
++print(" Ice-transport scaling gate (16-bin fiducial)")
++print("=================================================================")
++worst = 0.0
++for base in sorted(bases):
++    tot0 = sum(outs[0][i-1] for i in bases[base])
++    w = max(abs(sum(ab[i-1] for i in bases[base])-tot0)/tot0 for ab in outs)
++    worst = max(worst, w)
++    print(" J%-4s (%2d bins): total=%.4e  conservation rel-err=%.2e" % (base, len(bases[base]), tot0, w))
++print(" ice species = %d   coag+ice reactions = %s" % (len(bases), n_total))
++ok_cons  = worst < 1e-10
++ok_count = (n_total is not None) and (n_total < 100000)   # ~1e4 regime, not 1e5
++print(" gate (a) worst rel-err = %.2e   (tol 1e-10)  -> %s" % (worst, "OK" if ok_cons else "FAIL"))
++print(" term count %s < 1e5 (tractable)               -> %s" % (n_total, "OK" if ok_count else "FAIL"))
++print(" RESULT: %s" % ("PASS" if (ok_cons and ok_count) else "FAIL"))
++sys.exit(0 if (ok_cons and ok_count) else 1)
++PYEOF
++rc=$?
++echo "[coag_ice_scale] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"
++exit $rc
+diff --git a/tests/fixture_ice_fiducial/abundances.in b/tests/fixture_ice_fiducial/abundances.in
+new file mode 100644
+index 0000000..8f6471c
+--- /dev/null
++++ b/tests/fixture_ice_fiducial/abundances.in
+@@ -0,0 +1,6 @@
++! Abundances relative to H
++He          = 9.000000D-02
++H2          = 5.000000D-01
++JCO         = 1.000000D-04
++JH2O        = 2.000000D-04
++JCO2        = 5.000000D-05
+diff --git a/tests/fixture_ice_fiducial/activation_energies.in b/tests/fixture_ice_fiducial/activation_energies.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_ice_fiducial/element.in b/tests/fixture_ice_fiducial/element.in
+new file mode 100644
+index 0000000..e399349
+--- /dev/null
++++ b/tests/fixture_ice_fiducial/element.in
+@@ -0,0 +1,5 @@
++! name ; mass
++H            1.000
++He           4.000
++C           12.000
++O           16.000
+diff --git a/tests/fixture_ice_fiducial/gas_reactions.in b/tests/fixture_ice_fiducial/gas_reactions.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_ice_fiducial/gas_species.in b/tests/fixture_ice_fiducial/gas_species.in
+new file mode 100644
+index 0000000..215fc89
+--- /dev/null
++++ b/tests/fixture_ice_fiducial/gas_species.in
+@@ -0,0 +1,8 @@
++H            0  1  0  0  0
++H2           0  2  0  0  0
++He           0  0  1  0  0
++C            0  0  0  1  0
++O            0  0  0  0  1
++e-          -1  0  0  0  0
++GRAIN0       0  0  0  0  0
++GRAIN-      -1  0  0  0  0
+diff --git a/tests/fixture_ice_fiducial/grain_reactions.in b/tests/fixture_ice_fiducial/grain_reactions.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_ice_fiducial/grain_species.in b/tests/fixture_ice_fiducial/grain_species.in
+new file mode 100644
+index 0000000..e7bcc36
+--- /dev/null
++++ b/tests/fixture_ice_fiducial/grain_species.in
+@@ -0,0 +1,3 @@
++JCO          0  0  0  1  1
++JH2O         0  2  0  0  1
++JCO2         0  0  0  1  2
+diff --git a/tests/fixture_ice_fiducial/parameters.in b/tests/fixture_ice_fiducial/parameters.in
+new file mode 100644
+index 0000000..c350053
+--- /dev/null
++++ b/tests/fixture_ice_fiducial/parameters.in
+@@ -0,0 +1,56 @@
++!# Rung 1 dust-only coagulation fixture (ice-free, chemistry-off). Fast vehicle
++!# for validating the coagulation-ON path and the analytic gates in this sandbox.
++is_3_phase = 0
++preliminary_test = 0
++grain_temperature_type = fixed_to_dust_size
++is_grain_reactions = 0
++dust_grid_source = derived
++dust_ic = MRN
++a_min =  1.000E-06
++a_max =  3.2003E-05
++mass_ratio =  2.000E+00
++dust_power_law_index = -3.500E+00
++grain_density =  3.000E+00
++coagulation = 1
++coagulation_kernel = constant
++constant_kernel_k0 =  1.000E-09
++is_h2_formation_rate = 0
++is_absorption_h2 = 0
++is_absorption_co = 0
++is_absorption_n2 = 0
++is_photodesorb = 0
++is_crid = 0
++is_er_cir = 0
++grain_tunneling_diffusion = 0
++modify_rate_flag = 0
++sparsity = numerical
++sparsity_check_steps = 0
++conservation_type = 0
++nb_active_lay =  2.000E+00
++initial_gas_density =  2.212E+08
++initial_gas_temperature =  2.741E+01
++initial_visual_extinction =  1.582E+01
++cr_ionisation_rate =  1.300E-17
++x_ionisation_rate =  0.000E+00
++uv_flux =  1.554E+03
++initial_dtg_mass_ratio =  1.000E-02
++sticking_coeff_neutral =  1.000E+00
++sticking_coeff_positive =  0.000E+00
++sticking_coeff_negative =  0.000E+00
++grain_radius =  1.000E-05
++diffusion_barrier_thickness =  1.000E-08
++surface_site_density =  8.000E+14
++diff_binding_ratio_surf =  4.000E-01
++diff_binding_ratio_mant =  8.000E-01
++chemical_barrier_thickness =  1.000E-08
++cr_peak_grain_temp =  7.000E+01
++cr_peak_duration =  1.000E-05
++Fe_ionisation_rate =  3.000E-14
++vib_to_dissip_freq_ratio =  1.000E-02
++ED_H2 =  2.300E+01
++start_time =  1.000E+00
++stop_time =  1.000E+02
++nb_outputs = 5
++output_type = log
++relative_tolerance =  1.000E-04
++minimum_initial_abundance =  1.000E-40
+diff --git a/tests/fixture_ice_fiducial/surface_parameters.in b/tests/fixture_ice_fiducial/surface_parameters.in
+new file mode 100644
+index 0000000..e69de29
+-- 
+2.43.0
+

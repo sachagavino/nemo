@@ -504,6 +504,14 @@ real(double_precision) :: actual_gas_temp !< Gas temperature [K]
 real(double_precision), dimension(:), allocatable :: actual_dust_temp !< dim(nb_grains) Dust temperature [K]
 real(double_precision) :: actual_av !< Visual extinction [mag]
 real(double_precision) :: actual_gas_density !< Gas density [part/cm^3]
+!> TEST-FIXTURE INSTRUMENT (default .false., inert in production): when .true.,
+!! get_temporal_derivatives skips its set_dependant_rates recompute, holding the
+!! rate coefficients frozen while Y is perturbed. This is the only way to verify
+!! the RHS/Jacobian product-deposit WEIGHTS by finite difference (a weight of 1.0
+!! is inert, so byte-identity cannot exercise the weighting). Kept in-tree because
+!! every rung that touches the weight field -- coagulation now, GTODN Jacobian at
+!! Rung 5 -- must be able to re-run tests/jac_weight_check against it.
+logical :: freeze_dependent_rates = .false.
 
 
 contains 
