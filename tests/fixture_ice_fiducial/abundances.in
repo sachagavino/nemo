@@ -1,0 +1,6 @@
+! Abundances relative to H
+He          = 9.000000D-02
+H2          = 5.000000D-01
+JCO         = 1.000000D-04
+JH2O        = 2.000000D-04
+JCO2        = 5.000000D-05

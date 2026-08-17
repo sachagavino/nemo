@@ -256,6 +256,9 @@ subroutine dust_coagulation_inject_static()
       ' coag+ice reactions but counted ', nb_coagulation_reactions
     call exit(31)
   endif
+  write(*,'(a,i0,a,i0,a,i0,a,i0,a)') ' (coagulation) reactions: ', nb_coag_grain_reactions, &
+    ' grain + ', nb_ice_transport_reactions, ' ice-transport (', nb_ice_bases, &
+    ' ice species) = ', nb_coagulation_reactions, ' total.'
   return
 end subroutine dust_coagulation_inject_static
 
