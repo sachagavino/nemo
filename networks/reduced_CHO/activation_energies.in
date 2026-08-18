@@ -1,0 +1,8 @@
+!                                                         EA(K)
+JH         JCO                    -> JHCO                                                    2.50e+03   WOON priv commun -DPR
+JH         JH2CO                  -> JCH2OH                                                  5.40E+03   Ruaud et al. (2015) (WOON priv commun -DPR :2.50E+03)
+JH         JH2CO                  -> JCH3O                                                   2.20E+03   Ruaud et al. (2015)
+JH         JH2CO                  -> JHCO       JH2                                          1.74E+03   Ruaud et al. (2015)
+JH         JCH3OH                 -> JCH2OH     JH2                                          4.38E+03   Garrod 2013
+JH         JCH3OH                 -> JCH3O      JH2                                          6.64E+03   Garrod 2013
+JH2        JOH                    -> JH2O       JH                                           2.10e+03  JPhyChRefDat,13,1259
