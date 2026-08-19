@@ -1,0 +1,6 @@
+! Abundances relative to H nuclei -- reduced C/H/O network (proof-of-concept IC)
+H2          = 5.000000D-01 ! molecular hydrogen (carries all H nuclei)
+He          = 9.000000D-02 ! standard
+C+          = 1.700000D-04 ! carbon starts ionized
+O           = 2.400000D-04 ! oxygen atomic; C/O ~ 0.71
+e-          = 1.700000D-04 ! charge balance (~ C+); recomputed by conservation at init
