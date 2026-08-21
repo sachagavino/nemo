@@ -17,9 +17,6 @@ is_3_phase = 0 ! 0: 2 phase, 1: 3 phase.  v1 target is 2-phase; the 3-phase path
 !*****************************
 
 preliminary_test = 0 ! Comprehensive tests before the simulation. Switch off when launching many simulations.
-grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
-! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
-! gas: Tgrain = Tgas.
 is_grain_reactions = 1 ! Accretion, grain surface reactions
 is_h2_formation_rate = 1 ! h2 formation rates on surfaces from Bron et al. (2014)
 is_absorption_h2 = 1 ! H2 self-shielding from Lee & Herbst (1996) (1=activated)
@@ -55,6 +52,9 @@ uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference fl
 ! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
 ! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
 dust_grid_source = derived ! derived | tabulated
+grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
+! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
+! gas: Tgrain = Tgas.
 a_min =  5.000E-07 ! [cm] smallest representative grain radius (5 nm)
 a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)
 mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins derived from it

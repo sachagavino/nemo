@@ -1,0 +1,48 @@
+diff --git a/inputs/parameters.in b/inputs/parameters.in
+index 62181fc..8e495bf 100644
+--- a/inputs/parameters.in
++++ b/inputs/parameters.in
+@@ -17,9 +17,6 @@ is_3_phase = 0 ! 0: 2 phase, 1: 3 phase.  v1 target is 2-phase; the 3-phase path
+ !*****************************
+ 
+ preliminary_test = 0 ! Comprehensive tests before the simulation. Switch off when launching many simulations.
+-grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
+-! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
+-! gas: Tgrain = Tgas.
+ is_grain_reactions = 1 ! Accretion, grain surface reactions
+ is_h2_formation_rate = 1 ! h2 formation rates on surfaces from Bron et al. (2014)
+ is_absorption_h2 = 1 ! H2 self-shielding from Lee & Herbst (1996) (1=activated)
+@@ -55,6 +52,9 @@ uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference fl
+ ! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
+ ! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
+ dust_grid_source = derived ! derived | tabulated
++grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
++! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
++! gas: Tgrain = Tgas.
+ a_min =  5.000E-07 ! [cm] smallest representative grain radius (5 nm)
+ a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)
+ mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins derived from it
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 7308608..1fa9d68 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -374,9 +374,6 @@ use global_variables
+   write(10,'(a)') ""
+   write(10,'(a,i0,a)') 'preliminary_test = ', IS_TEST, ' ! Will or will not do comprehensive tests &
+   &before the simulation. Switch it off when lauching thousands or simulations'
+-  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed_to_dust_size, gas'
+-  write(10,'(a)') '! fixed_to_dust_size: Td = Td(a), one temperature per size bin;'
+-  write(10,'(a)') '! gas: Tgrain = Tgas ;'
+   write(10,'(a,i0,a)') 'is_grain_reactions = ', IS_GRAIN_REACTIONS, ' ! Accretion, grain surface reactions'
+   write(10,'(a,i0,a)') 'is_h2_formation_rate = ', is_h2_formation_rate, ' ! h2 formation rates on surfaces from Bron et al: (2014)'
+   write(10,'(a,i0,a)') 'is_absorption_h2 = ', is_absorption_h2, ' ! H2 self-shielding from Lee & Herbst (1996) (1=activated)'
+@@ -417,6 +414,9 @@ use global_variables
+   write(10,'(a)') "!*****************************"
+   write(10,'(a)') "! Grid geometry: mass grid, geometric in mass, from a_min..a_max at mass_ratio."
+   write(10,'(a,a,a)') 'dust_grid_source = ', trim(dust_grid_source), ' ! derived or tabulated (dust_grid_table.in)'
++  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed_to_dust_size, gas'
++  write(10,'(a)') '! fixed_to_dust_size: Td = Td(a), one temperature per size bin;'
++  write(10,'(a)') '! gas: Tgrain = Tgas ;'
+   write(10,'(a,es10.3e2,a)') 'a_min = ', a_min, ' ! [cm] smallest representative grain radius'
+   write(10,'(a,es10.3e2,a)') 'a_max = ', a_max, ' ! [cm] largest representative grain radius'
+   write(10,'(a,es10.3e2,a)') 'mass_ratio = ', mass_ratio, ' ! per-bin mass ratio (<= 2; nb_bins derived from it)'
