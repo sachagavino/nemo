@@ -1,0 +1,91 @@
+diff --git a/inputs/parameters.in b/inputs/parameters.in
+index 3e29b51..62181fc 100644
+--- a/inputs/parameters.in
++++ b/inputs/parameters.in
+@@ -59,6 +59,15 @@ a_min =  5.000E-07 ! [cm] smallest representative grain radius (5 nm)
+ a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)
+ mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins derived from it
+ 
++!*****************************
++!*        Coagulation        *
++!*****************************
++! Grain coagulation via the Smoluchowski kernel, with ice riding the coagulating
++! grains (Rung 2). Default OFF: absent/0 reproduces nmgc-2.0 bit-identically.
++coagulation = 0 ! 0/1 master switch (default 0 = off)
++coagulation_kernel = constant ! constant | brownian (default constant)
++constant_kernel_k0 =  1.000E-09 ! [cm^3/s] constant-kernel value, used only when coagulation_kernel = constant
++
+ !*****************************
+ !*   Dust initial condition  *
+ !*****************************
+@@ -108,3 +117,8 @@ output_type = log ! linear, log
+ ! log   : Outputs times are log-spaced
+ relative_tolerance =  1.000E-04 ! Relative tolerance of the solver
+ minimum_initial_abundance =  1.000E-40 ! default minimum initial fraction abundance
++! Floor on the grain number density used as a DENOMINATOR (a per-grain quantity
++! n_X/n_grain), NOT the grain state variable -- flooring the population would inject
++! mass and break conservation. Absolute [grains/cm^3], same for every bin; converted
++! to a per-H abundance in the code. ~10 grains/AU^3. Surfaced now; consumed by Rung 3.
++grain_abundance_floor =  2.990E-39 ! [grains/cm^3] divisor floor (~10 grains/AU^3)
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index 41bf9a5..23d0c1c 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -52,6 +52,14 @@ call read_parameters_in()           ! Read simulation parameters. Need to read i
+ call get_grain_radii()              ! Read grain radius in cm
+ call get_YGRAIN()                   ! initialize character variables YGRAIN and YGRAIN_MINUS
+ call read_element_in()              ! Read list of prime elements, including their atomic mass (in AMU)
++! Coagulation transports only surface (J) ice; mantle (K) ice transport is not
++! implemented, so coagulation is 2-phase only in v1. Fail loudly rather than
++! silently leaving mantle ice untransported.
++if (coagulation .and. is_3_phase.eq.1) then
++  write(error_unit,'(a)') 'Error: coagulation ice transport is 2-phase only in v1 &
++    &(mantle K-ice transport is not implemented). Set is_3_phase = 0 or coagulation = 0.'
++  call exit(33)
++endif
+ ! Coagulation reactions are appended to the network as a terminal block. Count
+ ! them now -- after the grid (mass_grid) exists, BEFORE get_array_sizes sizes the
+ ! reaction arrays. Off by default => nb_coagulation_reactions stays 0.
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 0db4820..4753d1d 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -305,6 +305,15 @@ real(double_precision) :: sticking_coeff_neutral  !< sticking coefficient for ne
+ real(double_precision) :: sticking_coeff_positive !< sticking coefficient for positive species on grain surface [no unit]
+ real(double_precision) :: sticking_coeff_negative !< sticking coefficient for negative species on grain surface [no unit]
+ real(double_precision) :: MINIMUM_INITIAL_ABUNDANCE !< minimum value of the abundance (relative to H) [number ratio]
++!> [grains/cm^3] absolute floor on the grain number density, the same for every bin.
++!! SEMANTIC (important): this floors the DIVISOR wherever a live grain abundance is read
++!! as a denominator (e.g. a per-grain surface quantity n_X/n_grain), NOT the grain state
++!! variable itself -- flooring the population would inject mass and break conservation.
++!! Stored as an absolute density; the code converts it to a per-H abundance (divide by
++!! n_H) at the point of use. Surfaced now for the interface; CONSUMED by Rung 3, wired
++!! into nothing yet. Default ~10 grains/AU^3 (1 AU^3 = 3.348e39 cm^3 => 2.99e-39/cm^3).
++real(double_precision) :: grain_abundance_floor = 2.99d-39
++
+ real(double_precision) :: initial_gas_density !< [part/cm^3] initial gas density of the structure
+ real(double_precision) :: initial_gas_temperature !< initial gas temperature [K], simulation parameter
+ real(double_precision) :: INITIAL_VISUAL_EXTINCTION !< initial visual extinction [mag] 
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index f7490fe..7308608 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -484,6 +484,8 @@ use global_variables
+   write(10,'(a,es10.3e2, a)') 'relative_tolerance = ',RELATIVE_TOLERANCE, ' ! Relative tolerance of the solver'
+   write(10,'(a,es10.3e2,a)') 'minimum_initial_abundance = ', MINIMUM_INITIAL_ABUNDANCE, ' ! default minimum initial &
+                              &fraction abundance'
++  write(10,'(a,es10.3e2,a)') 'grain_abundance_floor = ', grain_abundance_floor, ' ! [grains/cm^3] floor on the grain &
++                             &number density used as a DENOMINATOR (not the state variable); ~10 grains/AU^3. Consumed by Rung 3.'
+   close(10)
+   
+ end subroutine write_parameters
+@@ -962,6 +964,9 @@ if (isDefined) then
+       ! Initial abundances
+       case('minimum_initial_abundance')
+         read(value, '(e12.6)') MINIMUM_INITIAL_ABUNDANCE
++
++      case('grain_abundance_floor')                 ! [grains/cm^3] divisor floor; consumed by Rung 3
++        read(value, '(e12.6)') grain_abundance_floor
+       
+       case('grain_temperature_type')
+         read(value, *) GRAIN_TEMPERATURE_TYPE

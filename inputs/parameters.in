@@ -60,6 +60,15 @@ a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)
 mass_ratio =  2.000E+00 ! per-bin mass ratio (<= 2 = mass-doubling); nb_bins derived from it
 
 !*****************************
+!*        Coagulation        *
+!*****************************
+! Grain coagulation via the Smoluchowski kernel, with ice riding the coagulating
+! grains (Rung 2). Default OFF: absent/0 reproduces nmgc-2.0 bit-identically.
+coagulation = 0 ! 0/1 master switch (default 0 = off)
+coagulation_kernel = constant ! constant | brownian (default constant)
+constant_kernel_k0 =  1.000E-09 ! [cm^3/s] constant-kernel value, used only when coagulation_kernel = constant
+
+!*****************************
 !*   Dust initial condition  *
 !*****************************
 dust_ic = MRN ! MRN | tabulated
@@ -108,3 +117,8 @@ output_type = log ! linear, log
 ! log   : Outputs times are log-spaced
 relative_tolerance =  1.000E-04 ! Relative tolerance of the solver
 minimum_initial_abundance =  1.000E-40 ! default minimum initial fraction abundance
+! Floor on the grain number density used as a DENOMINATOR (a per-grain quantity
+! n_X/n_grain), NOT the grain state variable -- flooring the population would inject
+! mass and break conservation. Absolute [grains/cm^3], same for every bin; converted
+! to a per-H abundance in the code. ~10 grains/AU^3. Surfaced now; consumed by Rung 3.
+grain_abundance_floor =  2.990E-39 ! [grains/cm^3] divisor floor (~10 grains/AU^3)

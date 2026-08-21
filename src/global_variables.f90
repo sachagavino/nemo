@@ -305,6 +305,15 @@ real(double_precision) :: sticking_coeff_neutral  !< sticking coefficient for ne
 real(double_precision) :: sticking_coeff_positive !< sticking coefficient for positive species on grain surface [no unit]
 real(double_precision) :: sticking_coeff_negative !< sticking coefficient for negative species on grain surface [no unit]
 real(double_precision) :: MINIMUM_INITIAL_ABUNDANCE !< minimum value of the abundance (relative to H) [number ratio]
+!> [grains/cm^3] absolute floor on the grain number density, the same for every bin.
+!! SEMANTIC (important): this floors the DIVISOR wherever a live grain abundance is read
+!! as a denominator (e.g. a per-grain surface quantity n_X/n_grain), NOT the grain state
+!! variable itself -- flooring the population would inject mass and break conservation.
+!! Stored as an absolute density; the code converts it to a per-H abundance (divide by
+!! n_H) at the point of use. Surfaced now for the interface; CONSUMED by Rung 3, wired
+!! into nothing yet. Default ~10 grains/AU^3 (1 AU^3 = 3.348e39 cm^3 => 2.99e-39/cm^3).
+real(double_precision) :: grain_abundance_floor = 2.99d-39
+
 real(double_precision) :: initial_gas_density !< [part/cm^3] initial gas density of the structure
 real(double_precision) :: initial_gas_temperature !< initial gas temperature [K], simulation parameter
 real(double_precision) :: INITIAL_VISUAL_EXTINCTION !< initial visual extinction [mag] 

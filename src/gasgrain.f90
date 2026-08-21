@@ -52,6 +52,14 @@ call read_parameters_in()           ! Read simulation parameters. Need to read i
 call get_grain_radii()              ! Read grain radius in cm
 call get_YGRAIN()                   ! initialize character variables YGRAIN and YGRAIN_MINUS
 call read_element_in()              ! Read list of prime elements, including their atomic mass (in AMU)
+! Coagulation transports only surface (J) ice; mantle (K) ice transport is not
+! implemented, so coagulation is 2-phase only in v1. Fail loudly rather than
+! silently leaving mantle ice untransported.
+if (coagulation .and. is_3_phase.eq.1) then
+  write(error_unit,'(a)') 'Error: coagulation ice transport is 2-phase only in v1 &
+    &(mantle K-ice transport is not implemented). Set is_3_phase = 0 or coagulation = 0.'
+  call exit(33)
+endif
 ! Coagulation reactions are appended to the network as a terminal block. Count
 ! them now -- after the grid (mass_grid) exists, BEFORE get_array_sizes sizes the
 ! reaction arrays. Off by default => nb_coagulation_reactions stays 0.

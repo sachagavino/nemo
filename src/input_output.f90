@@ -484,6 +484,8 @@ use global_variables
   write(10,'(a,es10.3e2, a)') 'relative_tolerance = ',RELATIVE_TOLERANCE, ' ! Relative tolerance of the solver'
   write(10,'(a,es10.3e2,a)') 'minimum_initial_abundance = ', MINIMUM_INITIAL_ABUNDANCE, ' ! default minimum initial &
                              &fraction abundance'
+  write(10,'(a,es10.3e2,a)') 'grain_abundance_floor = ', grain_abundance_floor, ' ! [grains/cm^3] floor on the grain &
+                             &number density used as a DENOMINATOR (not the state variable); ~10 grains/AU^3. Consumed by Rung 3.'
   close(10)
   
 end subroutine write_parameters
@@ -962,6 +964,9 @@ if (isDefined) then
       ! Initial abundances
       case('minimum_initial_abundance')
         read(value, '(e12.6)') MINIMUM_INITIAL_ABUNDANCE
+
+      case('grain_abundance_floor')                 ! [grains/cm^3] divisor floor; consumed by Rung 3
+        read(value, '(e12.6)') grain_abundance_floor
       
       case('grain_temperature_type')
         read(value, *) GRAIN_TEMPERATURE_TYPE
