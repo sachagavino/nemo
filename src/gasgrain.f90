@@ -75,19 +75,28 @@ get_structure_properties => get_structure_properties_fixed
 ! Initialize grain temperature prescription.
 !! HOOK (stage 3): these become explicit Td(a) prescriptions evaluated once on
 !! the size grid, together with T_CR,peak(a).
-select case(GRAIN_TEMPERATURE_TYPE)
-  case('fixed_to_dust_size') ! one temperature per size bin
-    get_grain_temperature => get_grain_temperature_fixed_to_dust_size
+! dust_grid_source is the single grid switch and sets WHERE per-bin Td comes from:
+! tabulated -> the table column; derived -> the derived_temperature sub-switch
+! (size_scaled = Td(a) via td_of_a; gas = Tgrain=Tgas). The runtime pointer reads the
+! per-bin grain_temp(:) array in every per-bin case (filled by td_of_a on derived, by
+! the table on tabulated) and uses the gas temperature only for derived + gas.
+if (trim(dust_grid_source) == 'tabulated') then
+  get_grain_temperature => get_grain_temperature_fixed_to_dust_size   ! per-bin Td from the table column
+else
+  select case(trim(DERIVED_TEMPERATURE))
+    case('size_scaled') ! Td(a) = reference_dust_temperature*(a/reference_grain_radius)^(-1/6)
+      get_grain_temperature => get_grain_temperature_fixed_to_dust_size
 
-  case('gas') ! Tgrain = Tgas
-    get_grain_temperature => get_grain_temperature_gas
+    case('gas')         ! Tgrain = Tgas for every bin
+      get_grain_temperature => get_grain_temperature_gas
 
-  case default
-    write(error_unit,*) 'The GRAIN_TEMPERATURE_TYPE="', trim(GRAIN_TEMPERATURE_TYPE),'" cannot be found.'
-    write(error_unit,*) 'Values possible : fixed_to_dust_size, gas'
-    write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
-    call exit(10)
-end select
+    case default
+      write(error_unit,*) 'derived_temperature="', trim(DERIVED_TEMPERATURE),'" not recognised.'
+      write(error_unit,*) 'Values possible (derived grid): size_scaled, gas'
+      write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
+      call exit(10)
+  end select
+endif
 
 ! Init global allocatable arrays. From now on, we can read data files
 call initialize_global_arrays()

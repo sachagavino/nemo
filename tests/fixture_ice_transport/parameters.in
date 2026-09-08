@@ -2,7 +2,7 @@
 !# for validating the coagulation-ON path and the analytic gates in this sandbox.
 is_3_phase = 0
 preliminary_test = 0
-grain_temperature_type = fixed_to_dust_size
+derived_temperature = size_scaled ! size_scaled | gas (derived grid)
 is_grain_reactions = 0
 dust_grid_source = derived
 dust_ic = MRN

@@ -414,9 +414,9 @@ use global_variables
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "! Grid geometry: mass grid, geometric in mass, from a_min..a_max at mass_ratio."
   write(10,'(a,a,a)') 'dust_grid_source = ', trim(dust_grid_source), ' ! derived or tabulated (dust_grid_table.in)'
-  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed_to_dust_size, gas'
-  write(10,'(a)') '! fixed_to_dust_size: Td = Td(a), one temperature per size bin;'
-  write(10,'(a)') '! gas: Tgrain = Tgas ;'
+  write(10,'(a,a,a)') 'derived_temperature = ', trim(DERIVED_TEMPERATURE), ' ! size_scaled | gas (derived grid only)'
+  write(10,'(a)') '! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;'
+  write(10,'(a)') '! gas: Tgrain = Tgas ; ignored when dust_grid_source = tabulated (Td from table column)'
   write(10,'(a,es10.3e2,a)') 'a_min = ', a_min, ' ! [cm] smallest representative grain radius'
   write(10,'(a,es10.3e2,a)') 'a_max = ', a_max, ' ! [cm] largest representative grain radius'
   write(10,'(a,es10.3e2,a)') 'mass_ratio = ', mass_ratio, ' ! per-bin mass ratio (<= 2; nb_bins derived from it)'
@@ -968,8 +968,8 @@ if (isDefined) then
       case('grain_abundance_floor')                 ! [grains/cm^3] divisor floor; consumed by Rung 3
         read(value, '(e12.6)') grain_abundance_floor
       
-      case('grain_temperature_type')
-        read(value, *) GRAIN_TEMPERATURE_TYPE
+      case('derived_temperature')
+        read(value, *) DERIVED_TEMPERATURE
          
       case default
         write(*,*) 'Warning: An unknown parameter has been found'

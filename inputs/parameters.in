@@ -52,8 +52,8 @@ uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference fl
 ! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
 ! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
 dust_grid_source = derived ! derived | tabulated
-grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
-! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
+derived_temperature = size_scaled ! size_scaled | gas (derived grid only; tabulated grid takes Td from the table column)
+! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;
 ! gas: Tgrain = Tgas.
 a_min =  5.000E-07 ! [cm] smallest representative grain radius (5 nm)
 a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)

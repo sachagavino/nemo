@@ -364,7 +364,11 @@ integer, parameter :: MAX_NUMBER_REACTION_TYPE=100 !< Max number of various reac
 integer, dimension(0:MAX_NUMBER_REACTION_TYPE-1) :: type_id_start !< list of id start for each reaction type given their type number
 integer, dimension(0:MAX_NUMBER_REACTION_TYPE-1) :: type_id_stop !< list of id stop for each reaction type given their type number
 
-character(len=80) :: GRAIN_TEMPERATURE_TYPE = 'fixed' !< ('fixed', 'fixed_to_dust_size', 'gas') How the grain temperature is set.
+!> Derived-grid grain-temperature choice: 'size_scaled' -> Td(a) via td_of_a
+!! (reference_dust_temperature*(a/reference_grain_radius)^(-1/6)); 'gas' -> Tgrain=Tgas
+!! for every bin. IGNORED when dust_grid_source='tabulated' (Td is the table column).
+!! dust_grid_source is the single grid switch; this is its derived-grid sub-switch.
+character(len=80) :: DERIVED_TEMPERATURE = 'size_scaled'
 !! STAGE 3: this becomes the name of an explicit Td(a) prescription evaluated once on the size grid.
 
 
