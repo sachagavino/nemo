@@ -1,0 +1,290 @@
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index b181be3..70f286d 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -119,13 +119,14 @@ end subroutine coag_pair_target
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ subroutine dust_coagulation_count()
+   implicit none
+-  integer :: i, j, k1, k2, nover, npair
++  integer :: i, j, k1, k2, nover, npair, c1, c2
+   real(double_precision) :: w1, w2
+   logical :: is_overflow
+ 
+-  ! Grain reactions: one per UNORDERED non-overflow pair (i<=j). Also count the
+-  ! ORDERED non-overflow pairs, which set the ice-transport reaction count once the
+-  ! number of ice bases is known (in get_array_sizes, after read_species).
++  ! Charge-resolved grain coagulation: per UNORDERED non-overflow bin pair (i<=j),
++  ! iterate the charge combos (0,-)x(0,-). For a self-bin pair only unordered charge
++  ! combos count (c1<=c2) -> 3; otherwise 4. Also count ORDERED non-overflow bin pairs;
++  ! ice transport (added in get_array_sizes) is that x nb_ice_bases x 2 partner charges.
+   nb_coag_grain_reactions = 0
+   coag_n_ordered_nonoverflow = 0
+   nover = 0
+@@ -135,7 +136,12 @@ subroutine dust_coagulation_count()
+       if (is_overflow) then
+         nover = nover + 1
+       else
+-        nb_coag_grain_reactions = nb_coag_grain_reactions + 1
++        do c1 = 0, 1
++          do c2 = 0, 1
++            if (i == j .and. c1 > c2) cycle      ! self-bin: unordered charge only
++            nb_coag_grain_reactions = nb_coag_grain_reactions + 1
++          enddo
++        enddo
+         coag_n_ordered_nonoverflow = coag_n_ordered_nonoverflow + 1     ! (i,j)
+         if (i /= j) coag_n_ordered_nonoverflow = coag_n_ordered_nonoverflow + 1  ! (j,i)
+       endif
+@@ -179,35 +185,49 @@ end subroutine dust_coagulation_count
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ subroutine dust_coagulation_inject_static()
+   implicit none
+-  integer :: i, j, k1, k2, slot, ns, b
++  integer :: i, j, k1, k2, slot, ns, b, c1, c2, cp, pc
+   real(double_precision) :: w1, w2
+   logical :: is_overflow
+   character(len=11) :: base
+ 
+   call coag_assert_type_unused()
+ 
+-  ! ---- (1) grain coagulation reactions: one per unordered non-overflow pair ----
++  ! ---- (1) grain coagulation reactions: charge-resolved over both {0,-} states ----
++  ! Per unordered non-overflow bin pair, per charge combo (c1,c2):
++  !   (0,0)          -> w1 GRAIN_k1(0) + w2 GRAIN_k2(0)
++  !   (0,-) or (-,0) -> w1 GRAIN_k1(-) + w2 GRAIN_k2(-)              (product charge -1)
++  !   (-,-)          -> w1 GRAIN_k1(-) + w2 GRAIN_k2(-) + e-         (shed one electron;
++  !                     the -2 state has no species, so charge is conserved via a free e-)
+   ns = 0
+   do i = 1, nb_grains
+     do j = i, nb_grains
+       call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+       if (is_overflow) cycle          ! policy (c): no reaction generated
+-      ns = ns + 1
+-      slot = nb_chemistry_reactions + ns
+-
+-      REACTION_COMPOUNDS_NAMES(:, slot) = ''
+-      REACTION_COMPOUNDS_NAMES(1, slot) = YGRAIN(i)     ! reactant 1
+-      REACTION_COMPOUNDS_NAMES(2, slot) = YGRAIN(j)     ! reactant 2
+-      ! slot 3 (reactant 3) left blank -> no_species -> two-body in the RHS
+-      REACTION_COMPOUNDS_NAMES(4, slot) = YGRAIN(k1)    ! product 1 (lower bin)
+-      REACTION_COMPOUNDS_NAMES(5, slot) = YGRAIN(k2)    ! product 2 (upper bin)
+-
+-      REACTION_TYPE(slot) = COAGULATION_TYPE
+-      REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
+-
+-      REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
+-      REACTION_PRODUCT_WEIGHTS(4, slot) = w1
+-      REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++      do c1 = 0, 1
++        do c2 = 0, 1
++          if (i == j .and. c1 > c2) cycle          ! self-bin: unordered charge only
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++          pc = 0
++          if (c1 == 1 .or. c2 == 1) pc = 1         ! any negative reactant -> negative product
++
++          REACTION_COMPOUNDS_NAMES(:, slot) = ''
++          REACTION_COMPOUNDS_NAMES(1, slot) = grain_name(i, c1)   ! reactant 1
++          REACTION_COMPOUNDS_NAMES(2, slot) = grain_name(j, c2)   ! reactant 2
++          REACTION_COMPOUNDS_NAMES(4, slot) = grain_name(k1, pc)  ! product 1 (lower bin)
++          REACTION_COMPOUNDS_NAMES(5, slot) = grain_name(k2, pc)  ! product 2 (upper bin)
++          if (c1 == 1 .and. c2 == 1) &
++            REACTION_COMPOUNDS_NAMES(6, slot) = 'e-'              ! (-)+(-) sheds an electron
++
++          REACTION_TYPE(slot) = COAGULATION_TYPE
++          REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
++
++          REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
++          REACTION_PRODUCT_WEIGHTS(4, slot) = w1
++          REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++          ! slot 6 (e- or blank) keeps weight 1
++        enddo
++      enddo
+     enddo
+   enddo
+ 
+@@ -217,12 +237,13 @@ subroutine dust_coagulation_inject_static()
+     call exit(31)
+   endif
+ 
+-  ! ---- (2) ice-transport reactions: J_i X + GRAIN_j -> w1 J_k1 X + w2 J_k2 X + GRAIN_j
+-  ! GRAIN_j is a weight-1 catalyst product (net-zero depletion, zero Jacobian row).
+-  ! ORDERED pairs: (i,j) transports the ice on bin i, (j,i) transports the ice on bin
+-  ! j -- both directions. i==j is one direction, and its full-K_ii rate (set later,
+-  ! bare kernel) already accounts for both grains' ice. Same product weights (w1,w2)
+-  ! as the grain reaction => ice follows the particle and is conserved by construction.
++  ! ---- (2) ice-transport reactions: J_i X + GRAIN_j(cp) -> w1 J_k1 X + w2 J_k2 X + GRAIN_j(cp)
++  ! GRAIN_j is a weight-1 catalyst product (net-zero, zero Jacobian row). Ice is charge-
++  ! agnostic (pooled in J_i X), but the transport rate depends on the TOTAL partner
++  ! population, so the partner is generated over both charges cp in {0,-}. ORDERED bin
++  ! pairs: (i,j) transports bin-i ice, (j,i) bin-j ice; i==j is one direction whose full
++  ! K_ii (bare kernel, set later) covers both grains' ice. Same (w1,w2) as the grain
++  ! reaction (ice-follows-particle) => ice conserved by construction.
+   call dust_ice_enumerate_bases()
+   do b = 1, nb_ice_bases
+     base = ice_base_names(b)
+@@ -230,23 +251,25 @@ subroutine dust_coagulation_inject_static()
+       do j = 1, nb_grains
+         call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+         if (is_overflow) cycle
+-        ns = ns + 1
+-        slot = nb_chemistry_reactions + ns
+-
+-        REACTION_COMPOUNDS_NAMES(:, slot) = ''
+-        REACTION_COMPOUNDS_NAMES(1, slot) = ice_name(i,  base)   ! reactant: ice on bin i
+-        REACTION_COMPOUNDS_NAMES(2, slot) = YGRAIN(j)            ! reactant: collision partner
+-        REACTION_COMPOUNDS_NAMES(4, slot) = ice_name(k1, base)  ! product: ice -> bin k1
+-        REACTION_COMPOUNDS_NAMES(5, slot) = ice_name(k2, base)  ! product: ice -> bin k2
+-        REACTION_COMPOUNDS_NAMES(6, slot) = YGRAIN(j)            ! product: partner catalyst
+-
+-        REACTION_TYPE(slot) = COAGULATION_TYPE
+-        REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
+-
+-        REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
+-        REACTION_PRODUCT_WEIGHTS(4, slot) = w1                   ! ice split, same eps as grains
+-        REACTION_PRODUCT_WEIGHTS(5, slot) = w2
+-        REACTION_PRODUCT_WEIGHTS(6, slot) = 1.d0                 ! catalyst regenerated
++        do cp = 0, 1                                   ! partner charge {0,-}
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++
++          REACTION_COMPOUNDS_NAMES(:, slot) = ''
++          REACTION_COMPOUNDS_NAMES(1, slot) = ice_name(i,  base)   ! reactant: pooled ice on bin i
++          REACTION_COMPOUNDS_NAMES(2, slot) = grain_name(j, cp)    ! reactant: collision partner
++          REACTION_COMPOUNDS_NAMES(4, slot) = ice_name(k1, base)  ! product: ice -> bin k1
++          REACTION_COMPOUNDS_NAMES(5, slot) = ice_name(k2, base)  ! product: ice -> bin k2
++          REACTION_COMPOUNDS_NAMES(6, slot) = grain_name(j, cp)    ! product: partner catalyst
++
++          REACTION_TYPE(slot) = COAGULATION_TYPE
++          REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
++
++          REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
++          REACTION_PRODUCT_WEIGHTS(4, slot) = w1                   ! ice split, same eps as grains
++          REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++          REACTION_PRODUCT_WEIGHTS(6, slot) = 1.d0                 ! catalyst regenerated
++        enddo
+       enddo
+     enddo
+   enddo
+@@ -277,6 +300,21 @@ function ice_name(k, base) result(nm)
+   return
+ end function ice_name
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Per-bin grain species name for bin k and charge c: neutral (c=0) -> YGRAIN(k)
++!! ("GRAINkk"), negative (c=1) -> YGRAIN_MINUS(k) ("GRAINkk-").
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++function grain_name(k, c) result(nm)
++  implicit none
++  integer, intent(in) :: k, c
++  character(len=11) :: nm
++  if (c == 0) then
++    nm = YGRAIN(k)
++  else
++    nm = YGRAIN_MINUS(k)
++  endif
++end function grain_name
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @brief Enumerate the base ice species from the expanded species list. Each ice
+ !! species X has a bin-1 form "J01X" in species_name; its base is the remainder
+@@ -312,8 +350,8 @@ end subroutine dust_ice_enumerate_bases
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ subroutine dust_coagulation_set_rates()
+   implicit none
+-  integer :: i, j, k1, k2, slot, ns, b
+-  real(double_precision) :: w1, w2
++  integer :: i, j, k1, k2, slot, ns, b, c1, c2, cp
++  real(double_precision) :: w1, w2, kern
+   logical :: is_overflow
+ 
+   if (trim(coagulation_kernel) == 'constant' .and. constant_kernel_k0 <= 0.d0) then
+@@ -321,29 +359,41 @@ subroutine dust_coagulation_set_rates()
+     call exit(31)
+   endif
+ 
+-  ! (1) grain reactions: kernel with the 1/2 self-pair factor (coag_kernel).
++  ! (1) grain reactions: bare kernel, with the 1/2 self-pair factor applied ONLY to a
++  ! same-bin SAME-CHARGE pair (identical reactants). (i0,i-) are distinct reactants and
++  ! get the full K_ii. Kernel is charge-blind (no Coulomb factor). Same (i,j,charge)
++  ! iteration as the injection so slots line up.
+   ns = 0
+   do i = 1, nb_grains
+     do j = i, nb_grains
+       call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+       if (is_overflow) cycle
+-      ns = ns + 1
+-      slot = nb_chemistry_reactions + ns
+-      reaction_rates(slot) = coag_kernel(i, j)
++      do c1 = 0, 1
++        do c2 = 0, 1
++          if (i == j .and. c1 > c2) cycle
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++          kern = coag_kernel_bare(i, j)
++          if (i == j .and. c1 == c2) kern = 0.5d0 * kern   ! identical reactants: count once
++          reaction_rates(slot) = kern
++        enddo
++      enddo
+     enddo
+   enddo
+ 
+-  ! (2) ice-transport reactions: BARE kernel (full K_ii on the diagonal). Same
+-  ! ordered-pair iteration as the injection so slots line up. Rate is independent of
+-  ! which ice base, so we just replay the pair loop nb_ice_bases times.
++  ! (2) ice-transport reactions: BARE kernel (full K_ii on the diagonal; reactants
++  ! J_i X and GRAIN_j are distinct). Same ordered-pair x ice-base x partner-charge
++  ! iteration as the injection so slots line up.
+   do b = 1, nb_ice_bases
+     do i = 1, nb_grains
+       do j = 1, nb_grains
+         call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+         if (is_overflow) cycle
+-        ns = ns + 1
+-        slot = nb_chemistry_reactions + ns
+-        reaction_rates(slot) = coag_kernel_bare(i, j)
++        do cp = 0, 1
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++          reaction_rates(slot) = coag_kernel_bare(i, j)
++        enddo
+       enddo
+     enddo
+   enddo
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index c3d5ca5..ede715e 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -720,7 +720,7 @@ nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number
+ ! nb_reactions -- and the whole build -- unchanged.
+ if (coagulation) then
+   nb_ice_bases = t_nb_species_for_grain
+-  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases
++  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases * 2  ! x2: partner charge {0,-}
+   nb_coagulation_reactions = nb_coag_grain_reactions + nb_ice_transport_reactions
+ endif
+ nb_chemistry_reactions = nb_reactions
+diff --git a/tests/r3_charge_check.f90 b/tests/r3_charge_check.f90
+new file mode 100644
+index 0000000..94f287e
+--- /dev/null
++++ b/tests/r3_charge_check.f90
+@@ -0,0 +1,18 @@
++program r3_charge_check
++  use global_variables
++  use gasgrain
++  implicit none
++  integer :: k, r
++  character(len=11) :: gname
++  call init_gasgrain()
++  write(*,'(a)') 'per-bin electron-sticking rate  GRAIN0k + e- -> GRAINk-'
++  write(*,'(a)') ' bin   a[cm]         reaction_rate        rate/a^2'
++  do k=1,nb_grains
++    write(gname,'(a,i2.2)') 'GRAIN', k
++    do r=1,nb_reactions
++      if (trim(REACTION_COMPOUNDS_NAMES(1,r))==trim(gname) .and. trim(REACTION_COMPOUNDS_NAMES(2,r))=='e-') then
++        write(*,'(i4,3es18.6)') k, grain_radii(k), reaction_rates(r), reaction_rates(r)/grain_radii(k)**2
++      endif
++    enddo
++  enddo
++end program r3_charge_check

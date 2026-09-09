@@ -720,7 +720,7 @@ nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number 
 ! nb_reactions -- and the whole build -- unchanged.
 if (coagulation) then
   nb_ice_bases = t_nb_species_for_grain
-  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases
+  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases * 2  ! x2: partner charge {0,-}
   nb_coagulation_reactions = nb_coag_grain_reactions + nb_ice_transport_reactions
 endif
 nb_chemistry_reactions = nb_reactions
