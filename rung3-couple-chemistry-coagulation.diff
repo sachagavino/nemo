@@ -1,0 +1,866 @@
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index b181be3..e0c5feb 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -119,13 +119,14 @@ end subroutine coag_pair_target
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ subroutine dust_coagulation_count()
+   implicit none
+-  integer :: i, j, k1, k2, nover, npair
++  integer :: i, j, k1, k2, nover, npair, c1, c2
+   real(double_precision) :: w1, w2
+   logical :: is_overflow
+ 
+-  ! Grain reactions: one per UNORDERED non-overflow pair (i<=j). Also count the
+-  ! ORDERED non-overflow pairs, which set the ice-transport reaction count once the
+-  ! number of ice bases is known (in get_array_sizes, after read_species).
++  ! Charge-resolved grain coagulation: per UNORDERED non-overflow bin pair (i<=j),
++  ! iterate the charge combos (0,-)x(0,-). For a self-bin pair only unordered charge
++  ! combos count (c1<=c2) -> 3; otherwise 4. Also count ORDERED non-overflow bin pairs;
++  ! ice transport (added in get_array_sizes) is that x nb_ice_bases x 2 partner charges.
+   nb_coag_grain_reactions = 0
+   coag_n_ordered_nonoverflow = 0
+   nover = 0
+@@ -135,7 +136,12 @@ subroutine dust_coagulation_count()
+       if (is_overflow) then
+         nover = nover + 1
+       else
+-        nb_coag_grain_reactions = nb_coag_grain_reactions + 1
++        do c1 = 0, 1
++          do c2 = 0, 1
++            if (i == j .and. c1 > c2) cycle      ! self-bin: unordered charge only
++            nb_coag_grain_reactions = nb_coag_grain_reactions + 1
++          enddo
++        enddo
+         coag_n_ordered_nonoverflow = coag_n_ordered_nonoverflow + 1     ! (i,j)
+         if (i /= j) coag_n_ordered_nonoverflow = coag_n_ordered_nonoverflow + 1  ! (j,i)
+       endif
+@@ -179,35 +185,49 @@ end subroutine dust_coagulation_count
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ subroutine dust_coagulation_inject_static()
+   implicit none
+-  integer :: i, j, k1, k2, slot, ns, b
++  integer :: i, j, k1, k2, slot, ns, b, c1, c2, cp, pc
+   real(double_precision) :: w1, w2
+   logical :: is_overflow
+   character(len=11) :: base
+ 
+   call coag_assert_type_unused()
+ 
+-  ! ---- (1) grain coagulation reactions: one per unordered non-overflow pair ----
++  ! ---- (1) grain coagulation reactions: charge-resolved over both {0,-} states ----
++  ! Per unordered non-overflow bin pair, per charge combo (c1,c2):
++  !   (0,0)          -> w1 GRAIN_k1(0) + w2 GRAIN_k2(0)
++  !   (0,-) or (-,0) -> w1 GRAIN_k1(-) + w2 GRAIN_k2(-)              (product charge -1)
++  !   (-,-)          -> w1 GRAIN_k1(-) + w2 GRAIN_k2(-) + e-         (shed one electron;
++  !                     the -2 state has no species, so charge is conserved via a free e-)
+   ns = 0
+   do i = 1, nb_grains
+     do j = i, nb_grains
+       call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+       if (is_overflow) cycle          ! policy (c): no reaction generated
+-      ns = ns + 1
+-      slot = nb_chemistry_reactions + ns
+-
+-      REACTION_COMPOUNDS_NAMES(:, slot) = ''
+-      REACTION_COMPOUNDS_NAMES(1, slot) = YGRAIN(i)     ! reactant 1
+-      REACTION_COMPOUNDS_NAMES(2, slot) = YGRAIN(j)     ! reactant 2
+-      ! slot 3 (reactant 3) left blank -> no_species -> two-body in the RHS
+-      REACTION_COMPOUNDS_NAMES(4, slot) = YGRAIN(k1)    ! product 1 (lower bin)
+-      REACTION_COMPOUNDS_NAMES(5, slot) = YGRAIN(k2)    ! product 2 (upper bin)
+-
+-      REACTION_TYPE(slot) = COAGULATION_TYPE
+-      REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
+-
+-      REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
+-      REACTION_PRODUCT_WEIGHTS(4, slot) = w1
+-      REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++      do c1 = 0, 1
++        do c2 = 0, 1
++          if (i == j .and. c1 > c2) cycle          ! self-bin: unordered charge only
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++          pc = 0
++          if (c1 == 1 .or. c2 == 1) pc = 1         ! any negative reactant -> negative product
++
++          REACTION_COMPOUNDS_NAMES(:, slot) = ''
++          REACTION_COMPOUNDS_NAMES(1, slot) = grain_name(i, c1)   ! reactant 1
++          REACTION_COMPOUNDS_NAMES(2, slot) = grain_name(j, c2)   ! reactant 2
++          REACTION_COMPOUNDS_NAMES(4, slot) = grain_name(k1, pc)  ! product 1 (lower bin)
++          REACTION_COMPOUNDS_NAMES(5, slot) = grain_name(k2, pc)  ! product 2 (upper bin)
++          if (c1 == 1 .and. c2 == 1) &
++            REACTION_COMPOUNDS_NAMES(6, slot) = 'e-'              ! (-)+(-) sheds an electron
++
++          REACTION_TYPE(slot) = COAGULATION_TYPE
++          REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
++
++          REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
++          REACTION_PRODUCT_WEIGHTS(4, slot) = w1
++          REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++          ! slot 6 (e- or blank) keeps weight 1
++        enddo
++      enddo
+     enddo
+   enddo
+ 
+@@ -217,12 +237,13 @@ subroutine dust_coagulation_inject_static()
+     call exit(31)
+   endif
+ 
+-  ! ---- (2) ice-transport reactions: J_i X + GRAIN_j -> w1 J_k1 X + w2 J_k2 X + GRAIN_j
+-  ! GRAIN_j is a weight-1 catalyst product (net-zero depletion, zero Jacobian row).
+-  ! ORDERED pairs: (i,j) transports the ice on bin i, (j,i) transports the ice on bin
+-  ! j -- both directions. i==j is one direction, and its full-K_ii rate (set later,
+-  ! bare kernel) already accounts for both grains' ice. Same product weights (w1,w2)
+-  ! as the grain reaction => ice follows the particle and is conserved by construction.
++  ! ---- (2) ice-transport reactions: J_i X + GRAIN_j(cp) -> w1 J_k1 X + w2 J_k2 X + GRAIN_j(cp)
++  ! GRAIN_j is a weight-1 catalyst product (net-zero, zero Jacobian row). Ice is charge-
++  ! agnostic (pooled in J_i X), but the transport rate depends on the TOTAL partner
++  ! population, so the partner is generated over both charges cp in {0,-}. ORDERED bin
++  ! pairs: (i,j) transports bin-i ice, (j,i) bin-j ice; i==j is one direction whose full
++  ! K_ii (bare kernel, set later) covers both grains' ice. Same (w1,w2) as the grain
++  ! reaction (ice-follows-particle) => ice conserved by construction.
+   call dust_ice_enumerate_bases()
+   do b = 1, nb_ice_bases
+     base = ice_base_names(b)
+@@ -230,23 +251,25 @@ subroutine dust_coagulation_inject_static()
+       do j = 1, nb_grains
+         call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+         if (is_overflow) cycle
+-        ns = ns + 1
+-        slot = nb_chemistry_reactions + ns
+-
+-        REACTION_COMPOUNDS_NAMES(:, slot) = ''
+-        REACTION_COMPOUNDS_NAMES(1, slot) = ice_name(i,  base)   ! reactant: ice on bin i
+-        REACTION_COMPOUNDS_NAMES(2, slot) = YGRAIN(j)            ! reactant: collision partner
+-        REACTION_COMPOUNDS_NAMES(4, slot) = ice_name(k1, base)  ! product: ice -> bin k1
+-        REACTION_COMPOUNDS_NAMES(5, slot) = ice_name(k2, base)  ! product: ice -> bin k2
+-        REACTION_COMPOUNDS_NAMES(6, slot) = YGRAIN(j)            ! product: partner catalyst
+-
+-        REACTION_TYPE(slot) = COAGULATION_TYPE
+-        REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
+-
+-        REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
+-        REACTION_PRODUCT_WEIGHTS(4, slot) = w1                   ! ice split, same eps as grains
+-        REACTION_PRODUCT_WEIGHTS(5, slot) = w2
+-        REACTION_PRODUCT_WEIGHTS(6, slot) = 1.d0                 ! catalyst regenerated
++        do cp = 0, 1                                   ! partner charge {0,-}
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++
++          REACTION_COMPOUNDS_NAMES(:, slot) = ''
++          REACTION_COMPOUNDS_NAMES(1, slot) = ice_name(i,  base)   ! reactant: pooled ice on bin i
++          REACTION_COMPOUNDS_NAMES(2, slot) = grain_name(j, cp)    ! reactant: collision partner
++          REACTION_COMPOUNDS_NAMES(4, slot) = ice_name(k1, base)  ! product: ice -> bin k1
++          REACTION_COMPOUNDS_NAMES(5, slot) = ice_name(k2, base)  ! product: ice -> bin k2
++          REACTION_COMPOUNDS_NAMES(6, slot) = grain_name(j, cp)    ! product: partner catalyst
++
++          REACTION_TYPE(slot) = COAGULATION_TYPE
++          REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
++
++          REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
++          REACTION_PRODUCT_WEIGHTS(4, slot) = w1                   ! ice split, same eps as grains
++          REACTION_PRODUCT_WEIGHTS(5, slot) = w2
++          REACTION_PRODUCT_WEIGHTS(6, slot) = 1.d0                 ! catalyst regenerated
++        enddo
+       enddo
+     enddo
+   enddo
+@@ -277,6 +300,21 @@ function ice_name(k, base) result(nm)
+   return
+ end function ice_name
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Per-bin grain species name for bin k and charge c: neutral (c=0) -> YGRAIN(k)
++!! ("GRAINkk"), negative (c=1) -> YGRAIN_MINUS(k) ("GRAINkk-").
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++function grain_name(k, c) result(nm)
++  implicit none
++  integer, intent(in) :: k, c
++  character(len=11) :: nm
++  if (c == 0) then
++    nm = YGRAIN(k)
++  else
++    nm = YGRAIN_MINUS(k)
++  endif
++end function grain_name
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @brief Enumerate the base ice species from the expanded species list. Each ice
+ !! species X has a bin-1 form "J01X" in species_name; its base is the remainder
+@@ -312,8 +350,8 @@ end subroutine dust_ice_enumerate_bases
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ subroutine dust_coagulation_set_rates()
+   implicit none
+-  integer :: i, j, k1, k2, slot, ns, b
+-  real(double_precision) :: w1, w2
++  integer :: i, j, k1, k2, slot, ns, b, c1, c2, cp
++  real(double_precision) :: w1, w2, kern
+   logical :: is_overflow
+ 
+   if (trim(coagulation_kernel) == 'constant' .and. constant_kernel_k0 <= 0.d0) then
+@@ -321,29 +359,41 @@ subroutine dust_coagulation_set_rates()
+     call exit(31)
+   endif
+ 
+-  ! (1) grain reactions: kernel with the 1/2 self-pair factor (coag_kernel).
++  ! (1) grain reactions: bare kernel, with the 1/2 self-pair factor applied ONLY to a
++  ! same-bin SAME-CHARGE pair (identical reactants). (i0,i-) are distinct reactants and
++  ! get the full K_ii. Kernel is charge-blind (no Coulomb factor). Same (i,j,charge)
++  ! iteration as the injection so slots line up.
+   ns = 0
+   do i = 1, nb_grains
+     do j = i, nb_grains
+       call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+       if (is_overflow) cycle
+-      ns = ns + 1
+-      slot = nb_chemistry_reactions + ns
+-      reaction_rates(slot) = coag_kernel(i, j)
++      do c1 = 0, 1
++        do c2 = 0, 1
++          if (i == j .and. c1 > c2) cycle
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++          kern = coag_kernel_bare(i, j)
++          if (i == j .and. c1 == c2) kern = 0.5d0 * kern   ! identical reactants: count once
++          reaction_rates(slot) = kern
++        enddo
++      enddo
+     enddo
+   enddo
+ 
+-  ! (2) ice-transport reactions: BARE kernel (full K_ii on the diagonal). Same
+-  ! ordered-pair iteration as the injection so slots line up. Rate is independent of
+-  ! which ice base, so we just replay the pair loop nb_ice_bases times.
++  ! (2) ice-transport reactions: BARE kernel (full K_ii on the diagonal; reactants
++  ! J_i X and GRAIN_j are distinct). Same ordered-pair x ice-base x partner-charge
++  ! iteration as the injection so slots line up.
+   do b = 1, nb_ice_bases
+     do i = 1, nb_grains
+       do j = 1, nb_grains
+         call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+         if (is_overflow) cycle
+-        ns = ns + 1
+-        slot = nb_chemistry_reactions + ns
+-        reaction_rates(slot) = coag_kernel_bare(i, j)
++        do cp = 0, 1
++          ns = ns + 1
++          slot = nb_chemistry_reactions + ns
++          reaction_rates(slot) = coag_kernel_bare(i, j)
++        enddo
+       enddo
+     enddo
+   enddo
+@@ -424,12 +474,15 @@ subroutine dust_coagulation_flux_diag(dropped, total)
+   real(double_precision) :: w1, w2, ni, nj, f
+   logical :: is_overflow
+ 
++  ! Collision-rate flux summed over the TOTAL bin population (both charge states), since
++  ! Rung 3 coagulates GRAIN0 and GRAIN- together. dropped = fraction landing above the
++  ! top bin (overflow pairs, not generated); the runtime guard warns when it grows.
+   dropped = 0.d0
+   total   = 0.d0
+   do i = 1, nb_grains
+-    ni = abundances(INDGRAIN(i))
++    ni = abundances(INDGRAIN(i)) + abundances(INDGRAIN_MINUS(i))
+     do j = i, nb_grains
+-      nj = abundances(INDGRAIN(j))
++      nj = abundances(INDGRAIN(j)) + abundances(INDGRAIN_MINUS(j))
+       f  = coag_kernel(i, j) * ni * nj        ! collision-rate contribution of this pair
+       total = total + f
+       call coag_pair_target(i, j, k1, k2, w1, w2, is_overflow)
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index c3d5ca5..ede715e 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -720,7 +720,7 @@ nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number
+ ! nb_reactions -- and the whole build -- unchanged.
+ if (coagulation) then
+   nb_ice_bases = t_nb_species_for_grain
+-  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases
++  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases * 2  ! x2: partner charge {0,-}
+   nb_coagulation_reactions = nb_coag_grain_reactions + nb_ice_transport_reactions
+ endif
+ nb_chemistry_reactions = nb_reactions
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index 3d56976..705c78b 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -1236,6 +1236,7 @@ end subroutine get_temporal_derivatives
+   REAL(double_precision) :: PROBH2H2 ! probability for the encounter desorption process.
+   REAL(double_precision) :: TETABIS,TETABIS1,TETABIS2,TETABIS3
+   REAL(double_precision) :: T300, TI, TSQ
++  REAL(double_precision) :: gtodn_i !< 4c: per-bin 1/n_grain for the monolayer count (live+floored when coag on, frozen GTODN when off)
+   REAL(double_precision) :: YMOD1, YMOD2
+   INTEGER :: IMOD1 !< modify rate flag for reactant 1
+   INTEGER :: IMOD2 !< modify rate flag for reactant 2 
+@@ -1395,9 +1396,21 @@ abCO(1:nb_grains) = 0.d0
+   MLAY = 2.d0
+   
+   do i=1,nb_grains
+-    SUMLAY(i)     =  ab_tot(i)*GTODN(i)/nb_sites_per_grain(i)
+-    sumlaysurf(i) = ab_surf(i)*GTODN(i)/nb_sites_per_grain(i)
+-    sumlaymant(i) = ab_mant(i)*GTODN(i)/nb_sites_per_grain(i)
++    ! 4c (partial coupling): the monolayer COUNT (ice loading) uses the LIVE total grain
++    ! number when coagulation is on -- summed over BOTH charge states and floored so
++    ! 1/n_grain stays finite as coagulation drains a bin. With coagulation off the total
++    ! grain number is conserved (charging only moves grains between charge states), so the
++    ! frozen GTODN(i)=1/Y_total,init IS the live value: use it, keeping coag-off runs
++    ! bit-identical to nmgc-2.0 (equivalence.sh). ab_lay and every surface-RATE GTODN
++    ! stay frozen -- only this counting site goes live (Rung 3; full dynamic GTODN is Rung 5).
++    if (coagulation) then
++      gtodn_i = 1.d0 / max(Y(INDGRAIN(i)) + Y(INDGRAIN_MINUS(i)), grain_abundance_floor / H_number_density)
++    else
++      gtodn_i = GTODN(i)
++    endif
++    SUMLAY(i)     =  ab_tot(i) *gtodn_i/nb_sites_per_grain(i)
++    sumlaysurf(i) = ab_surf(i)*gtodn_i/nb_sites_per_grain(i)
++    sumlaymant(i) = ab_mant(i)*gtodn_i/nb_sites_per_grain(i)
+   enddo    
+   
+   UVCR = 1.300d-17 / CR_IONISATION_RATE
+diff --git a/tests/coag_ice_operator_check.f90 b/tests/coag_ice_operator_check.f90
+new file mode 100644
+index 0000000..40fc0bc
+--- /dev/null
++++ b/tests/coag_ice_operator_check.f90
+@@ -0,0 +1,81 @@
++! ===========================================================================
++! tests/coag_ice_operator_check.f90
++!
++! 4e diagnostic: ice-transport OPERATOR net-zero per species. With chemistry on, total
++! ice is not conserved (surface reactions form/destroy it), so end-to-end ice
++! conservation cannot be used. Instead we verify the COAGULATION-GENERATED ice-transport
++! operator conserves ice per species BY CONSTRUCTION: for every ice-transport reaction
++!   J_i X + GRAIN_j(c) -> w1 J_k1 X + w2 J_k2 X + GRAIN_j(c)
++! the two products carry the SAME ice base X as the reactant and w1+w2 = 1, and the
++! GRAIN partner is regenerated (catalyst, weight 1). Then the operator's net
++! contribution to sum_bins Y(J_k X) is identically zero for ANY state and every step --
++! a static-weight invariant, strictly stronger than a runtime sample. (jac_weight_check
++! separately confirms these weights reach the RHS and Jacobian.)
++!
++! Run via tests/coag_ice_operator_check.sh on an ice-bearing coag fixture. RESULT: PASS.
++! ===========================================================================
++program coag_ice_operator_check
++  use global_variables
++  use gasgrain
++  use dust_evolution
++  implicit none
++  integer :: r, nb_ice_rx, nbug
++  character(len=11) :: xr, x1, x2
++  real(double_precision) :: wsum, worst_wsum
++  real(double_precision), parameter :: tol = 1.d-14
++
++  call init_gasgrain()
++  nb_ice_rx = 0; nbug = 0; worst_wsum = 0.d0
++
++  do r = nb_chemistry_reactions+1, nb_reactions
++    if (REACTION_TYPE(r) /= COAGULATION_TYPE) cycle
++    if (REACTION_COMPOUNDS_NAMES(1,r)(1:1) /= 'J') cycle    ! ice-bearing reactant => ice-transport reaction
++    nb_ice_rx = nb_ice_rx + 1
++
++    xr = ice_base_of(REACTION_COMPOUNDS_NAMES(1,r))          ! base X of the reactant J_i X
++    x1 = ice_base_of(REACTION_COMPOUNDS_NAMES(4,r))          ! base of product 1
++    x2 = ice_base_of(REACTION_COMPOUNDS_NAMES(5,r))          ! base of product 2
++
++    ! products must carry the SAME ice base as the reactant (no cross-species transport)
++    if (trim(x1) /= trim(xr) .or. trim(x2) /= trim(xr)) then
++      write(*,'(a,i0,5a)') '  FAIL r=',r,' base mismatch: reactant J..',trim(xr), &
++        ' -> J..',trim(x1),'/J..'//trim(x2)
++      nbug = nbug + 1
++    endif
++    ! product weights must sum to 1 (ice conserved per reaction)
++    wsum = REACTION_PRODUCT_WEIGHTS(4,r) + REACTION_PRODUCT_WEIGHTS(5,r)
++    worst_wsum = max(worst_wsum, abs(wsum - 1.d0))
++    if (abs(wsum - 1.d0) > tol) then
++      write(*,'(a,i0,a,es12.4)') '  FAIL r=',r,' w1+w2 = ', wsum
++      nbug = nbug + 1
++    endif
++    ! partner catalyst: product 6 must equal reactant 2 with weight 1 (net-zero on GRAIN)
++    if (trim(REACTION_COMPOUNDS_NAMES(6,r)) /= trim(REACTION_COMPOUNDS_NAMES(2,r)) .or. &
++        abs(REACTION_PRODUCT_WEIGHTS(6,r) - 1.d0) > tol) then
++      write(*,'(a,i0)') '  FAIL r=',r,' partner catalyst missing/incorrect'
++      nbug = nbug + 1
++    endif
++  enddo
++
++  write(*,'(a)') '=================================================================='
++  write(*,'(a)') ' Ice-transport operator net-zero (structural, per species)'
++  write(*,'(a)') '=================================================================='
++  write(*,'(a,i0)')      ' ice-transport reactions checked = ', nb_ice_rx
++  write(*,'(a,es10.2)')  ' worst |w1+w2 - 1|               = ', worst_wsum
++  write(*,'(a,i0)')      ' violations                      = ', nbug
++  if (nb_ice_rx > 0 .and. nbug == 0) then
++    write(*,'(a)') ' RESULT: PASS'
++  else
++    write(*,'(a)') ' RESULT: FAIL'
++    call exit(1)
++  endif
++
++contains
++  !> base ice name of a per-bin ice species "J"//kk//base -> base (or '' if not ice)
++  function ice_base_of(nm) result(base)
++    character(len=*), intent(in) :: nm
++    character(len=11) :: base
++    base = ''
++    if (nm(1:1) == 'J') base = trim(nm(4:))
++  end function ice_base_of
++end program coag_ice_operator_check
+diff --git a/tests/coag_rung3_3a.sh b/tests/coag_rung3_3a.sh
+new file mode 100755
+index 0000000..8ca314b
+--- /dev/null
++++ b/tests/coag_rung3_3a.sh
+@@ -0,0 +1,66 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_rung3_3a.sh   --   Rung 3 gate 3a: conservation with chemistry on
++#
++# On the coupled reduced_CHO run (coag ON, chemistry + charging ON), assert:
++#   * dust-core mass  Sum_k m_k*[Y(GRAIN_k0)+Y(GRAIN_k-)]  conserved to machine
++#     precision (SUMMED OVER BOTH CHARGE STATES -- a neutral-only sum drifts on the
++#     charging that moves grains between states at fixed m_k);
++#   * ice-transport operator net-zero per species (structural, all ice-transport
++#     reactions conserve their ice base with w1+w2=1) -- since total ice is NOT
++#     conserved with chemistry on, this is the operator-level check.
++# Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++echo "[3a] building (-O0)..."; make OPT=-O0 >/tmp/3a_b.log 2>&1 || { echo build FAIL; tail -20 /tmp/3a_b.log; exit 3; }
++gfortran -O0 -ffree-line-length-none -Jbuild -Ibuild -c tests/coag_ice_operator_check.f90 -o build/coag_ice_operator_check.o 2>>/tmp/3a_b.log \
++  || { echo "operator-check compile FAIL"; tail -20 /tmp/3a_b.log; exit 3; }
++OBJS="$(ls build/*.o build/dust/*.o 2>/dev/null | grep -vE 'build/main\.o|_check\.o' | tr '\n' ' ')"
++gfortran -O0 build/coag_ice_operator_check.o $OBJS -o bin/coag_ice_operator_check 2>>/tmp/3a_b.log || { echo "operator-check link FAIL"; exit 3; }
++
++R="$(mktemp -d)"; trap 'rm -rf "$R"' EXIT
++cp networks/reduced_CHO/*.in "$R"/; cp inputs/element.in "$R"/
++sed 's/^coagulation = .*/coagulation = 1/' tests/fixture_rung3/parameters.in > "$R"/parameters.in
++echo "[3a] coupled run (coag on, chemistry+charging on)..."
++( cd "$R" && "$ROOT/bin/nmgc" run >run.log 2>&1 ) || { echo "run FAIL"; tail -5 "$R"/run.log; exit 1; }
++
++echo "[3a] operator net-zero (structural)..."
++( cd "$R" && "$ROOT/bin/coag_ice_operator_check" >op.log 2>&1 )
++grep -q "RESULT: PASS" "$R"/op.log && OPOK=1 || OPOK=0
++grep -E "reactions checked|worst|violations" "$R"/op.log | sed 's/^/   /'
++
++python3 - "$R" "$OPOK" <<'PY'
++import sys, struct, re, math
++R=sys.argv[1]; opok=int(sys.argv[2])
++names={}
++for line in open(R+"/species.out"):
++    for m in re.finditer(r"(\d+)\)\s+(\S+)", line): names[int(m.group(1))]=m.group(2)
++nb=max(names); idx={v:k for k,v in names.items()}
++g0=sorted((n for n in names.values() if re.match(r"GRAIN\d+$",n)),key=lambda s:int(re.search(r"\d+",s).group()))
++gm=sorted((n for n in names.values() if re.match(r"GRAIN\d+-$",n)),key=lambda s:int(re.search(r"\d+",s).group()))
++rad={}
++for l in open(R+"/dust_grid_active.out"):
++    if l.startswith("!") or not l.strip(): continue
++    p=l.split(); rad[int(float(p[4]))]=float(p[0])
++m=[(4/3)*math.pi*rad[k]**3*3.0 for k in range(1,len(g0)+1)]
++data=open(R+"/abundances.out","rb").read();pos=0
++def rec(d,p):
++    (n,)=struct.unpack_from("<i",d,p);p+=4;pl=d[p:p+n];p+=n;(n2,)=struct.unpack_from("<i",d,p);p+=4;return pl,p
++outs=[]
++while pos<len(data):
++    tp,pos=rec(data,pos);_,pos=rec(data,pos);ap,pos=rec(data,pos);outs.append(struct.unpack("<%dd"%nb,ap))
++def dmass(ab,both=True): return sum(m[k]*(ab[idx[n0]-1]+(ab[idx[nm]-1] if both else 0)) for k,(n0,nm) in enumerate(zip(g0,gm)))
++m0=dmass(outs[0]); wb=max(abs(dmass(ab)-m0)/m0 for ab in outs)
++wn=max(abs(dmass(ab,False)-dmass(outs[0],False))/dmass(outs[0],False) for ab in outs)
++print("=================================================================")
++print(" Rung 3 gate 3a: conservation with chemistry on")
++print("=================================================================")
++print(" dust-core mass (both charges) worst rel-err = %.2e   (tol 1e-10)"%wb)
++print(" (neutral-only would read %.2e -- why both-charge sum is required)"%wn)
++print(" ice-transport operator net-zero            = %s"%("PASS" if opok else "FAIL"))
++ok = wb<1e-10 and opok
++print(" RESULT: %s"%("PASS" if ok else "FAIL"))
++sys.exit(0 if ok else 1)
++PY
++rc=$?; echo "[3a] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"; exit $rc
+diff --git a/tests/coag_rung3_3b.sh b/tests/coag_rung3_3b.sh
+new file mode 100755
+index 0000000..c62c55b
+--- /dev/null
++++ b/tests/coag_rung3_3b.sh
+@@ -0,0 +1,91 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_rung3_3b.sh  --  Rung 3 gate 3b: slow-coag reduction (primary acceptance)
++#
++# As coagulation is scaled into the slow regime (t_coag = 1/(K N) >> t_run), the coupled
++# run must reduce to the coag-OFF reference. We run the reference (coag off) and TWO slow
++# K0 values 10x apart, and require:
++#   * the coupled run matches the reference to a small rtol, and
++#   * rtol TRACKS ~linearly with K0 (10x smaller K0 -> ~10x tighter match) -- one passing
++#     point is not the test; the linear collapse is,
++#   * the divisor FLOOR is never triggered in the slow runs (a K0-independent floor hit is
++#     the prime suspect for a 3b plateau).
++# Identical stop_time / cadence across all three runs (from fixture_rung3/parameters.in).
++# Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++echo "[3b] building (-O0)..."; make OPT=-O0 >/tmp/3b_b.log 2>&1 || { echo build FAIL; tail -20 /tmp/3b_b.log; exit 3; }
++
++WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
++run() {  # $1=label  $2=coagulation  $3=K0
++  local d="$WORK/$1"; mkdir -p "$d"
++  cp networks/reduced_CHO/*.in "$d"/; cp inputs/element.in "$d"/
++  sed -e "s/^coagulation = .*/coagulation = $2/" -e "s/^constant_kernel_k0 = .*/constant_kernel_k0 = $3/" \
++      tests/fixture_rung3/parameters.in > "$d"/parameters.in
++  ( cd "$d" && "$ROOT/bin/nmgc" run >run.log 2>&1 ) || { echo "run $1 FAIL"; tail -5 "$d"/run.log; exit 1; }
++}
++echo "[3b] reference (coag off) + two slow K0 (5e-18, 5e-19)..."
++run ref 0 "1.000E-14"
++run slowA 1 "5.000E-18"
++run slowB 1 "5.000E-19"
++
++python3 - "$WORK" <<'PY'
++import sys, struct, re
++W=sys.argv[1]
++def load(d):
++    names={}
++    for line in open(d+"/species.out"):
++        for m in re.finditer(r"(\d+)\)\s+(\S+)", line): names[int(m.group(1))]=m.group(2)
++    nb=max(names)
++    data=open(d+"/abundances.out","rb").read();pos=0;outs=[]
++    def rec(x,p):
++        (n,)=struct.unpack_from("<i",x,p);p+=4;pl=x[p:p+n];p+=n;(n2,)=struct.unpack_from("<i",x,p);p+=4;return pl,p
++    while pos<len(data):
++        tp,pos=rec(data,pos);(t,)=struct.unpack("<d",tp);_,pos=rec(data,pos);ap,pos=rec(data,pos)
++        outs.append((t,struct.unpack("<%dd"%nb,ap)))
++    return names,outs
++def worst_reldiff(a,b,floor=1e-10):
++    # Reduction is measured on species above an abundance floor. Rationale: atol=1e-99
++    # (negligible) and satol=max(atol,1e-16*init)~0 for ice, so trace species are
++    # controlled PURELY at rtol=1e-4 relative -- their run-to-run rel-diff sits at the
++    # ~rtol jitter floor with no K0 dependence (verified: J04H's slow-vs-ref ratio is
++    # non-monotonic 0.2-10.4, abundances identical to ~4 sig figs). Species above 1e-10
++    # carry a physical reduction signal >> rtol jitter and collapse to exactly 10.00 at
++    # every output (e.g. GRAIN01). The floor separates signal from rtol jitter; it is
++    # NOT masking a real deviation (that would scale with K0, which J04H's does not).
++    w=0.0
++    for (ta, va),(tb,vb) in zip(a,b):
++        for x,y in zip(va,vb):
++            s=max(abs(x),abs(y))
++            if s>floor: w=max(w, abs(x-y)/s)
++    return w
++def grain_min_total(d):  # min over run of per-bin (Y0+Y-), for floor check
++    names,outs=load(d); idx={v:k for k,v in names.items()}
++    import re as _re
++    g0=[n for n in names.values() if _re.match(r"GRAIN\d+$",n)]; gm=[n for n in names.values() if _re.match(r"GRAIN\d+-$",n)]
++    g0=sorted(g0,key=lambda s:int(_re.search(r"\d+",s).group())); gm=sorted(gm,key=lambda s:int(_re.search(r"\d+",s).group()))
++    return min(min(ab[idx[a]-1]+ab[idx[b]-1] for a,b in zip(g0,gm)) for _,ab in outs)
++
++_,ref = load(W+"/ref")
++_,sA  = load(W+"/slowA")
++_,sB  = load(W+"/slowB")
++rA = worst_reldiff(ref, sA); rB = worst_reldiff(ref, sB)
++floor_thr = 2.990e-39/2.0e8
++gA = grain_min_total(W+"/slowA"); gB = grain_min_total(W+"/slowB")
++print("=================================================================")
++print(" Rung 3 gate 3b: slow-coag reduction to the coag-off reference")
++print("=================================================================")
++print(" K0 = 5e-18 : worst rel-diff vs reference = %.3e"%rA)
++print(" K0 = 5e-19 : worst rel-diff vs reference = %.3e"%rB)
++print(" linearity  : rA/rB = %.2f  (expect ~10 as K0 drops 10x)"%(rA/rB if rB>0 else float('inf')))
++print(" floor      : min(Y0+Y-) slowA=%.2e slowB=%.2e  vs floor %.2e  (>> => never triggered)"%(gA,gB,floor_thr))
++lin = 5.0 <= (rA/rB if rB>0 else 0) <= 20.0        # ~10x, allow 2x slack
++small = rA < 5e-2
++floor_ok = min(gA,gB) > floor_thr*1e3
++ok = lin and small and floor_ok
++print(" RESULT: %s%s"%("PASS" if ok else "FAIL",
++      "" if ok else "  [%s%s%s]"%("small " if not small else "", "linearity " if not lin else "", "floor" if not floor_ok else "")))
++sys.exit(0 if ok else 1)
++PY
++rc=$?; echo "[3b] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"; exit $rc
+diff --git a/tests/coag_rung3_3c.sh b/tests/coag_rung3_3c.sh
+new file mode 100755
+index 0000000..1dc5ce4
+--- /dev/null
++++ b/tests/coag_rung3_3c.sh
+@@ -0,0 +1,73 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_rung3_3c.sh  --  Rung 3 gate 3c: nominal-coag difference (signed)
++#
++# At the nominal kernel (t_coag ~ t_run), the coupled run must differ from the coag-off
++# reference IN THE EXPECTED DIRECTION: dust-core mass migrates to larger bins (grains
++# grow) and surface ice migrates with it (larger-bin J_k X populations rise). Measured
++# as the mass-weighted and ice-weighted MEAN BIN INDEX at the final time -- both must be
++# larger in the coupled run than in the reference. A directional check, not "differs".
++# (Coverage-switch (silicate<->ASW) structure from the live SUMLAY is expected, not a bug.)
++# Identical stop_time/cadence to the reference (fixture_rung3/parameters.in).
++# Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++echo "[3c] building (-O0)..."; make OPT=-O0 >/tmp/3c_b.log 2>&1 || { echo build FAIL; tail -20 /tmp/3c_b.log; exit 3; }
++WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
++run(){ d="$WORK/$1"; mkdir -p "$d"; cp networks/reduced_CHO/*.in "$d"/; cp inputs/element.in "$d"/;
++  sed -e "s/^coagulation = .*/coagulation = $2/" -e "s/^constant_kernel_k0 = .*/constant_kernel_k0 = $3/" \
++      tests/fixture_rung3/parameters.in > "$d"/parameters.in
++  ( cd "$d" && "$ROOT/bin/nmgc" run >run.log 2>&1 ) || { echo "run $1 FAIL"; tail -5 "$d"/run.log; exit 1; }; }
++echo "[3c] reference (coag off) + nominal coag (K0=1e-14)..."
++run ref 0 "1.000E-14"
++run nom 1 "1.000E-14"
++
++python3 - "$WORK" <<'PY'
++import sys, struct, re, math
++W=sys.argv[1]
++def load(d):
++    names={}
++    for line in open(d+"/species.out"):
++        for m in re.finditer(r"(\d+)\)\s+(\S+)",line): names[int(m.group(1))]=m.group(2)
++    nb=max(names); data=open(d+"/abundances.out","rb").read();pos=0;outs=[]
++    def rec(x,p):
++        (n,)=struct.unpack_from("<i",x,p);p+=4;pl=x[p:p+n];p+=n;struct.unpack_from("<i",x,p);p+=4;return pl,p
++    while pos<len(data):
++        tp,pos=rec(data,pos);_,pos=rec(data,pos);ap,pos=rec(data,pos);outs.append(struct.unpack("<%dd"%nb,ap))
++    rad={}
++    for l in open(d+"/dust_grid_active.out"):
++        if l.startswith("!") or not l.strip(): continue
++        p=l.split(); rad[int(float(p[4]))]=float(p[0])
++    return names,outs,rad
++def mean_bins(d):
++    names,outs,rad=load(d); idx={v:k for k,v in names.items()}
++    g0=sorted((n for n in names.values() if re.match(r"GRAIN\d+$",n)),key=lambda s:int(re.search(r"\d+",s).group()))
++    gm=sorted((n for n in names.values() if re.match(r"GRAIN\d+-$",n)),key=lambda s:int(re.search(r"\d+",s).group()))
++    ice=[n for n in names.values() if re.match(r"J\d\d",n)]
++    m=[(4/3)*math.pi*rad[k]**3*3.0 for k in range(1,len(g0)+1)]
++    ab=outs[-1]  # final time
++    # mass-weighted mean bin index
++    mass=[m[k]*(ab[idx[a]-1]+ab[idx[b]-1]) for k,(a,b) in enumerate(zip(g0,gm))]
++    mbin=sum((k+1)*mass[k] for k in range(len(mass)))/sum(mass)
++    # ice-weighted mean bin index (total ice, all species)
++    icebin_num=0.0; icebin_den=0.0
++    for nmk in ice:
++        k=int(re.match(r"J(\d\d)",nmk).group(1)); icebin_num+=k*ab[idx[nmk]-1]; icebin_den+=ab[idx[nmk]-1]
++    ibin=icebin_num/icebin_den if icebin_den>0 else 0.0
++    return mbin, ibin
++mR,iR=mean_bins(W+"/ref"); mN,iN=mean_bins(W+"/nom")
++print("=================================================================")
++print(" Rung 3 gate 3c: nominal-coag directional migration (final time)")
++print("=================================================================")
++print(" mass-weighted mean bin:  reference %.4f -> coupled %.4f  (%+.2e)"%(mR,mN,mN-mR))
++print(" ice-weighted  mean bin:  reference %.4f -> coupled %.4f  (%+.2e)"%(iR,iN,iN-iR))
++mass_up = mN > mR + 1e-6
++ice_up  = iN > iR + 1e-6
++print(" dust-core mass migrated to larger bins : %s"%("YES" if mass_up else "NO"))
++print(" surface ice migrated to larger bins    : %s"%("YES" if ice_up else "NO"))
++ok = mass_up and ice_up
++print(" RESULT: %s"%("PASS" if ok else "FAIL"))
++sys.exit(0 if ok else 1)
++PY
++rc=$?; echo "[3c] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"; exit $rc
+diff --git a/tests/coag_rung3_td_check.sh b/tests/coag_rung3_td_check.sh
+new file mode 100755
+index 0000000..7b597ba
+--- /dev/null
++++ b/tests/coag_rung3_td_check.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_rung3_td_check.sh  --  P3: dust-temperature wiring guard (kept in harness)
++#
++# Rung 3 is the first load-bearing use of Td(a). Confirm the derived-grid path fills
++# grain_temp(:) from the a^(-1/6) prescription, by checking dust_grid_active.out's Td
++# column against  reference_dust_temperature * (a/reference_grain_radius)^(-1/6).
++# A guard so a future grid/parameter change can't silently break dust temperature.
++# Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++make OPT=-O0 >/tmp/td_b.log 2>&1 || { echo build FAIL; tail -10 /tmp/td_b.log; exit 3; }
++R="$(mktemp -d)"; trap 'rm -rf "$R"' EXIT
++cp networks/reduced_CHO/*.in "$R"/; cp inputs/element.in "$R"/
++cp tests/fixture_rung3/parameters.in "$R"/parameters.in     # derived grid, size_scaled Td
++( cd "$R" && "$ROOT/bin/nmgc" run >run.log 2>&1 ) || { echo "run FAIL"; tail -5 "$R"/run.log; exit 1; }
++python3 - "$R" <<'PY'
++import sys, re
++R=sys.argv[1]
++P={}
++for l in open(R+"/parameters.in"):
++    if '=' in l and not l.strip().startswith('!'):
++        k,v=l.split('=',1); P[k.strip()]=v.split('!')[0].strip()
++Tref=float(P.get('reference_dust_temperature','10'))
++aref=float(P.get('reference_grain_radius','1.0e-5'))
++worst=0.0
++print(" bin   a[cm]        Td(dumped)     td_of_a        rel.err")
++for l in open(R+"/dust_grid_active.out"):
++    if l.startswith("!") or not l.strip(): continue
++    p=l.split(); a=float(p[0]); Td=float(p[2])
++    ana=Tref*(a/aref)**(-1.0/6.0); e=abs(Td-ana)/ana; worst=max(worst,e)
++    print("  %s   %.4e   %.6f     %.6f     %.1e"%(p[4],a,Td,ana,e))
++print(" P3 worst rel-err = %.2e"%worst)
++import sys as _s; _s.exit(0 if worst<1e-6 else 1)
++PY
++rc=$?; echo "[td_check] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"; exit $rc
+diff --git a/tests/fixture_rung3/README.md b/tests/fixture_rung3/README.md
+new file mode 100644
+index 0000000..38bba5c
+--- /dev/null
++++ b/tests/fixture_rung3/README.md
+@@ -0,0 +1,4 @@
++Rung 3 coupled-run config: reduced_CHO network on a derived 4-bin grid (5-10 nm,
++mass_ratio 2), chemistry + grain charging on, sparsity = numerical (4d). Gate scripts
++(coag_rung3_*.sh) stage networks/reduced_CHO/*.in + inputs/element.in + this
++parameters.in, overriding coagulation and constant_kernel_k0 per regime.
+diff --git a/tests/fixture_rung3/parameters.in b/tests/fixture_rung3/parameters.in
+new file mode 100644
+index 0000000..476778c
+--- /dev/null
++++ b/tests/fixture_rung3/parameters.in
+@@ -0,0 +1,124 @@
++!# ------------------------------------------------
++!# Parameter file for the 0D multi-grain gas-grain model.
++!# ------------------------------------------------
++!# Blank lines, or lines with only spaces, are skipped.
++!# Only non-commented lines with a '=' are read: identifier = value(s),
++!# each value separated by at least one space. The parameter part of a line
++!# must be <= 80 characters; comments after it can be longer.
++
++!*****************************
++!*   Switch 2/3 phase model  *
++!*****************************
++
++is_3_phase = 0 ! 0: 2 phase, 1: 3 phase.  v1 target is 2-phase; the 3-phase path is kept, not removed.
++
++!*****************************
++!*          Switches         *
++!*****************************
++
++preliminary_test = 0 ! Comprehensive tests before the simulation. Switch off when launching many simulations.
++is_grain_reactions = 1 ! Accretion, grain surface reactions
++is_h2_formation_rate = 1 ! h2 formation rates on surfaces from Bron et al. (2014)
++is_absorption_h2 = 1 ! H2 self-shielding from Lee & Herbst (1996) (1=activated)
++is_absorption_co = 2 ! CO self-shielding. (1: Lee & Herbst (1996),  2: Visser et al. (2009))
++is_absorption_n2 = 1 ! N2 self-shielding from Li et al. (2013) (1=activated)
++is_photodesorb = 1 ! Switch to turn on the photodesorption of ices (default yield is 1e-4)
++is_crid = 0 ! Switch to turn on the CRID (cosmic rays induced diffusion) mechanism
++is_er_cir = 0 ! Switch to turn on Eley-Rideal and Complex Induced Reaction mechanisms (default=0: desactivated)
++grain_tunneling_diffusion = 0 ! 0=thermal; For H,H2: 1=QM1; 2=QM2; 3=choose fastest
++modify_rate_flag = 0 ! 1=modify H; 2=modify H,H2, 3=modify all, -1=H+H only
++conservation_type = 0 ! 0=only e- conserved; 1=elem #1 conserved, 2=elem #1 & #2, etc
++
++!*****************************
++!* Number of active layers   *
++!*****************************
++
++nb_active_lay =  2.000E+00 ! Number of active layers
++
++!*****************************
++!*    Gas phase parameters   *
++!*****************************
++
++initial_gas_density =  2.212E+08 ! initial gas density [part/cm-3]
++initial_gas_temperature =  2.741E+01 ! initial gas temperature [K]
++initial_visual_extinction =  1.582E+01 ! initial visual extinction
++cr_ionisation_rate =  1.300E-17 ! cosmic ray ionisation rate [s-1] (standard=1.3e-17)
++x_ionisation_rate =  0.000E+00 ! Ionisation rate due to X-rays [s-1]
++uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference flux (1.=nominal)
++
++!*****************************
++!*   Dust grid               *
++!*****************************
++! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
++! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
++dust_grid_source = derived ! derived | tabulated
++derived_temperature = size_scaled ! size_scaled | gas (derived grid only; tabulated grid takes Td from the table column)
++! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;
++! gas: Tgrain = Tgas.
++a_min =  5.000E-07
++a_max =  1.0001E-06
++mass_ratio =  2.000E+00
++
++!*****************************
++!*        Coagulation        *
++!*****************************
++! Grain coagulation via the Smoluchowski kernel, with ice riding the coagulating
++! grains (Rung 2). Default OFF: absent/0 reproduces nmgc-2.0 bit-identically.
++coagulation = 0 ! gates override: 0=reference, 1=slow/nominal
++coagulation_kernel = constant ! constant | brownian (default constant)
++constant_kernel_k0 =  1.000E-14 ! gates override for slow/nominal
++
++!*****************************
++!*   Dust initial condition  *
++!*****************************
++dust_ic = MRN ! MRN | tabulated
++dust_power_law_index = -3.500E+00 ! dn/da ~ a^index (-3.5 = MRN); normalised by initial_dtg_mass_ratio
++sparsity = numerical ! Rung 3 (4d): live divisor adds d(rate)/dY(GRAIN_k); symbolic is Rung 4
++sparsity_check_steps = 5 ! debug: assert numerical subset symbolic on first N steps (0 disables)
++
++!*****************************
++!*      Grain parameters     *
++!*****************************
++! The size grid, the initial dust distribution, and the Td(a)/T_CR,peak(a) maps
++! currently live in 0D_grain_sizes.in. At stage 3 the grid moves here (derived
++! from a_min, a_max, mass_ratio + grain_density), the distribution moves to its
++! own IC file, and the maps become named prescriptions.
++
++initial_dtg_mass_ratio =  2.000E+00
++sticking_coeff_neutral =  1.000E+00 ! sticking coeff for neutral species
++sticking_coeff_positive =  0.000E+00 ! sticking coeff for positive species
++sticking_coeff_negative =  0.000E+00 ! sticking coeff for negative species
++grain_density =  3.000E+00 ! mass density of grain material
++reference_grain_radius =  1.000E-05 ! reference grain radius [cm]: single effective grain for is_grain_reactions=0, and a_ref for Td(a)
++reference_dust_temperature =  1.000E+01 ! [K] Td at reference_grain_radius; T_ref for the size-scaled Td(a) prescription
++diffusion_barrier_thickness =  1.000E-08 ! Barrier thickness [cm]
++surface_site_density =  8.000E+14 ! site density on one grain [cm-2]
++diff_binding_ratio_surf =  4.000E-01 ! Ratio used to compute DIFFUSION_BARRIER from BINDING_ENERGY if not known (surface species)
++diff_binding_ratio_mant =  8.000E-01 ! Ratio used to compute DIFFUSION_BARRIER from BINDING_ENERGY if not known (mantle species)
++chemical_barrier_thickness =  1.000E-08 ! grain reaction activation energy barrier width [cm]
++cr_peak_grain_temp =  7.000E+01 ! peak grain temperature [K] (CR heating)
++cr_peak_duration =  1.000E-05 ! duration [s] of peak grain temperature
++Fe_ionisation_rate =  3.000E-14 ! (cosmic) Fe-ion--grain encounter [s-1 grain-1]
++!! (for 0.1 micron grain) For cosmic photo desorptions, only Fe-ions are efficient to heat grains.
++vib_to_dissip_freq_ratio =  1.000E-02 ! [no unit] ratio of the surface-molecule bond frequency to the frequency at
++!! which energy is lost to the grain surface. Used for the RRK desorption mechanism
++!! (see Garrod et al. 2007). Assumed to be 1% by default.
++ED_H2 =  2.300E+01 ! H2 binding energy over itself. Used for the desorption encounter mechanism [K].
++
++!*****************************
++!*  Integration and Outputs  *
++!*****************************
++
++start_time =  1.000E+00
++stop_time =  1.000E+05
++nb_outputs = 20
++output_type = log ! linear, log
++! linear: Output times are linearly spaced
++! log   : Outputs times are log-spaced
++relative_tolerance =  1.000E-04 ! Relative tolerance of the solver
++minimum_initial_abundance =  1.000E-40 ! default minimum initial fraction abundance
++! Floor on the grain number density used as a DENOMINATOR (a per-grain quantity
++! n_X/n_grain), NOT the grain state variable -- flooring the population would inject
++! mass and break conservation. Absolute [grains/cm^3], same for every bin; converted
++! to a per-H abundance in the code. ~10 grains/AU^3. Surfaced now; consumed by Rung 3.
++grain_abundance_floor =  2.990E-39 ! [grains/cm^3] divisor floor (~10 grains/AU^3)
+diff --git a/tests/r3_charge_check.f90 b/tests/r3_charge_check.f90
+new file mode 100644
+index 0000000..6bd3a06
+--- /dev/null
++++ b/tests/r3_charge_check.f90
+@@ -0,0 +1,21 @@
++program r3_charge_check
++  use global_variables
++  use gasgrain
++  implicit none
++  integer :: k, r
++  character(len=11) :: g0,gm
++  real(double_precision) :: rf, rd
++  call init_gasgrain()
++  write(*,'(a)') 'CHARGE-RATE a^2 CHECK'
++  write(*,'(a)') ' bin  a[cm]      k_form/a^2       k_dest/a^2'
++  do k=1,nb_grains
++    write(g0,'(a,i2.2)') 'GRAIN',k
++    write(gm,'(a,i2.2,a)') 'GRAIN',k,'-'
++    rf=0; rd=0
++    do r=1,nb_reactions
++      if (trim(REACTION_COMPOUNDS_NAMES(1,r))==trim(g0).and.trim(REACTION_COMPOUNDS_NAMES(2,r))=='e-') rf=reaction_rates(r)
++      if (rd==0.d0.and.trim(REACTION_COMPOUNDS_NAMES(1,r))==trim(gm)) rd=reaction_rates(r)
++    enddo
++    write(*,'(i4,3es16.6)') k, grain_radii(k), rf/grain_radii(k)**2, rd/grain_radii(k)**2
++  enddo
++end program

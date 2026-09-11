@@ -1236,6 +1236,7 @@ end subroutine get_temporal_derivatives
   REAL(double_precision) :: PROBH2H2 ! probability for the encounter desorption process.
   REAL(double_precision) :: TETABIS,TETABIS1,TETABIS2,TETABIS3
   REAL(double_precision) :: T300, TI, TSQ
+  REAL(double_precision) :: gtodn_i !< 4c: per-bin 1/n_grain for the monolayer count (live+floored when coag on, frozen GTODN when off)
   REAL(double_precision) :: YMOD1, YMOD2
   INTEGER :: IMOD1 !< modify rate flag for reactant 1
   INTEGER :: IMOD2 !< modify rate flag for reactant 2 
@@ -1395,9 +1396,21 @@ abCO(1:nb_grains) = 0.d0
   MLAY = 2.d0
   
   do i=1,nb_grains
-    SUMLAY(i)     =  ab_tot(i)*GTODN(i)/nb_sites_per_grain(i)
-    sumlaysurf(i) = ab_surf(i)*GTODN(i)/nb_sites_per_grain(i)
-    sumlaymant(i) = ab_mant(i)*GTODN(i)/nb_sites_per_grain(i)
+    ! 4c (partial coupling): the monolayer COUNT (ice loading) uses the LIVE total grain
+    ! number when coagulation is on -- summed over BOTH charge states and floored so
+    ! 1/n_grain stays finite as coagulation drains a bin. With coagulation off the total
+    ! grain number is conserved (charging only moves grains between charge states), so the
+    ! frozen GTODN(i)=1/Y_total,init IS the live value: use it, keeping coag-off runs
+    ! bit-identical to nmgc-2.0 (equivalence.sh). ab_lay and every surface-RATE GTODN
+    ! stay frozen -- only this counting site goes live (Rung 3; full dynamic GTODN is Rung 5).
+    if (coagulation) then
+      gtodn_i = 1.d0 / max(Y(INDGRAIN(i)) + Y(INDGRAIN_MINUS(i)), grain_abundance_floor / H_number_density)
+    else
+      gtodn_i = GTODN(i)
+    endif
+    SUMLAY(i)     =  ab_tot(i) *gtodn_i/nb_sites_per_grain(i)
+    sumlaysurf(i) = ab_surf(i)*gtodn_i/nb_sites_per_grain(i)
+    sumlaymant(i) = ab_mant(i)*gtodn_i/nb_sites_per_grain(i)
   enddo    
   
   UVCR = 1.300d-17 / CR_IONISATION_RATE
