@@ -199,11 +199,24 @@ rate expressions, stop — that is Rung 5.
 
 ### 4d. Sparsity: run `sparsity = numerical` for this rung
 The coagulation, ice-transport, and new live-divisor couplings are **not** in the
-symbolic pattern yet (that append is Rung 4). Running `symbolic` here would give a
-too-sparse Jacobian and silently degrade Newton. Run **numerical** sparsity for Rung
-3 (it discovers the full pattern, including the new `d(rate)/dY(GRAIN_k)` from the
-live divisor). The floor keeps that reciprocal entry finite. Symbolic-append + the
-`subset` assert is Rung 4's job.
+symbolic pattern yet (that append is Rung 4). Run **numerical** sparsity for Rung 3;
+the symbolic-append + `subset` assert is Rung 4's job.
+
+> **[Correction, added during Rung 4 — the original claim here was wrong.]**
+> This section originally stated that numerical sparsity "discovers the full pattern,
+> including the new `d(rate)/dY(GRAIN_k)` from the live divisor." **That is false**, and
+> the error is on the design side, not the executor's. With `mf=121` (MOSS=1/MITER=1),
+> DLSODES obtains *both* the structure and the values from the analytic `get_jacobian`,
+> which treats the reaction rate coefficient as constant and never computes
+> `d(rate)/dY(GRAIN_k)`. So the live-divisor Jacobian entry was never produced — it does
+> not exist in the analytic routine, and numerical discovery therefore cannot find it.
+> The Rung 3 **RHS is complete and correct**, so all Rung 3 gates (3a/3b/3c — all RHS
+> properties) remain valid: the missing term affects only Newton's convergence
+> *efficiency*, and at the Rung 3 small-grid/slow-kernel config it is not load-bearing,
+> which is why Rung 3 converged. At the *physical fiducial* config the missing term does
+> bite (repeated `ISTATE=-4`). Completing the Jacobian — both wiring the symbolic
+> structure via `MOSS=0` and supplying the missing values — is the actual content of
+> Rung 4. See `docs/PhaseII_rung4_sparsity_scale.md`.
 
 ### 4e. Diagnostics — land these BEFORE turning the physics on
 Each must read zero-drift on the reference before coupling adds complexity.
