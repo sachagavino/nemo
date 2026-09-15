@@ -237,9 +237,24 @@ call init_relevant_reactions()
 !! the jacobian
 call count_nonzeros()
 
+! Require the complete symbolic pattern only when the selected method actually consumes
+! a user-supplied pattern (MOSS=0: mf < 100 -- the FD-complete oracle 022 or Rung 5's
+! analytic-complete 021). Production ships 121 (MOSS=1), which discovers structure from
+! get_jacobian and ignores the supplied pattern, so coag-on+121 runs fine with numerical
+! (e.g. the 3b/3c physics gates on the fixture). The numerical pattern omits the
+! live-divisor block, so it cannot serve as the MOSS=0 basis; symbolic is required there.
+if (coagulation .and. solver_method_flag().lt.100 .and. sparsity.ne.'symbolic') then
+  write(Error_unit,'(a)') 'FATAL: this solver method supplies the sparsity pattern (MOSS=0) '// &
+    'and requires sparsity = symbolic (the numerical pattern omits the live-divisor block).'
+  stop 1
+endif
+
 ! In symbolic mode, build the fixed sparsity superset once from the reaction list
 ! (also raises nb_nonzeros_values to the symbolic per-column max for work sizing).
 if (sparsity.eq.'symbolic') call build_symbolic_sparsity()
+
+! Rung 4 gate (a): assert the live-divisor block made it into the symbolic pattern.
+if (coagulation .and. sparsity.eq.'symbolic') call assert_live_divisor_in_pattern()
 
 
 ! Do preliminary tests, before starting the integration
@@ -266,6 +281,64 @@ WRITE(*,'(a)')""
 call flush(stdo)
 
 end subroutine init_gasgrain
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief DLSODES method flag. Production ships 121 (analytic sparse Jacobian,
+!! MOSS=1/MITER=1) for both coag-off and coag-on; the FD-complete path (022) is a
+!! verification oracle reached only via the NEMO_ORACLE_MF environment variable.
+!!
+!! coag OFF -> 121. Grains frozen, live divisor inactive; also reproduces nmgc-2.0
+!!   bit-for-bit (equivalence.sh), which MOSS=0/MITER=2 would break.
+!! coag ON  -> 121 (Rung 4). The only live grain-abundance coupling is the monolayer
+!!   divisor SUMLAY, which is BOUNDED by construction (floored, see ode_solver.f90
+!!   ~1550), so its Jacobian derivative -> 0 as a bin depletes -- it is never the
+!!   stiff -1/Y^2 reciprocal. The entry get_jacobian omits is therefore harmless at
+!!   Rung 4: 121 is correct, converges better, and ~4x faster than FD-complete.
+!!   Rung 5 retargets THIS branch to 021 (analytic-complete) once the reciprocal
+!!   GTODN entries are added to get_jacobian, keeping 022 as the oracle it is
+!!   verified against.
+!!
+!! Oracle override: NEMO_ORACLE_MF forces the flag (e.g. 22 = FD-complete: MOSS=0 +
+!!   complete symbolic pattern + MITER=2). Intended for the gate/oracle harness with
+!!   coagulation on and sparsity=symbolic; never set in production configs.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+integer function solver_method_flag()
+use global_variables
+implicit none
+integer :: oracle
+
+oracle = oracle_mf_override()
+if (oracle.ne.0) then
+  solver_method_flag = oracle
+  return
+endif
+
+if (coagulation) then
+  solver_method_flag = 121   ! Rung 5: retarget to 021 (analytic-complete)
+else
+  solver_method_flag = 121
+endif
+
+return
+end function solver_method_flag
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Read the NEMO_ORACLE_MF environment variable (verification/test only).
+!! Returns 0 when unset/blank/unparseable (production default), else the forced mf.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+integer function oracle_mf_override()
+implicit none
+character(len=32) :: v
+integer :: ln, st, val
+
+oracle_mf_override = 0
+call get_environment_variable('NEMO_ORACLE_MF', v, ln, st)
+if (st.ne.0 .or. ln.le.0) return
+read(v, *, iostat=st) val
+if (st.eq.0) oracle_mf_override = val
+
+return
+end function oracle_mf_override
 
 
 

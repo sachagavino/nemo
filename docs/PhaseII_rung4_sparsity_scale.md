@@ -250,3 +250,74 @@ smoke test is fine as a sanity check; the full study is not this rung.
 (analytic reciprocal Jacobian across the ~23 GTODN sites *and* the live divisor), which
 reuses the declared-dependency facility built here and is verified against this rung's FD
 path before production switches to `mf=021`.
+
+---
+
+## 8. Execution outcome (as-built)
+
+Two diagnoses during execution changed the plan; both were confirmed and endorsed by the
+design thread, which owns the corrections below.
+
+**Finding 1 — `get_jacobian` treats the rate coefficient as constant.** It never computes
+`d(rate)/dY(GRAIN_k)`. Under `mf=121` (MOSS=1/MITER=1) both structure and values flow
+through `get_jacobian`, so the live-divisor Jacobian entry has never reached Newton — in
+Rung 3 or here. The Rung 3 §4d claim ("numerical discovers `d(rate)/dY(GRAIN_k)`") is
+**retracted**. Rung 3 is not compromised: the RHS is complete, so 3a/3b/3c stand; only
+Newton's convergence efficiency was ever affected.
+
+**Finding 2 — the symbolic pattern was never wired into the solve.** Under MOSS=1 DLSODES
+derives structure from `get_jacobian` and ignores the user IA/JA in IWORK, so
+numerical≡symbolic was byte-identical *by construction*. Consuming the supplied pattern
+requires MOSS=0.
+
+**Decision — option (a): ship the plumbing, keep production analytic.** The Rung 4 live
+divisor is the monolayer count `SUMLAY(k) = ab_tot(k)/(Y(GRAIN_k0)+Y(GRAIN_k-))`, with the
+denominator **floored** (`ode_solver.f90` ~1550). The floor caps `SUMLAY`, so
+`d(SUMLAY)/dY(GRAIN_k) → 0` as a bin depletes — it is a **bounded** coupling, never the
+stiff `−1/Y²` reciprocal. That reciprocal is the *dynamic surface-rate GTODN* (~23 sites),
+which stays **frozen** at Rung 4 and is Rung 5's job. Consequences:
+
+- The full plumbing is built and kept: the general non-reactant `(row,col)` declared-
+  dependency facility (`declare_jacobian_dependency`), the live-divisor populator
+  (`build_live_divisor_dependencies`, GRAIN_RANK-keyed superset: every compound of every
+  bin-`k` reaction couples to `GRAIN_k0/GRAIN_k−`), MOSS=0 wiring, and the FD-complete
+  path (`mf=022`).
+- **Production coag-on stays `mf=121`** (analytic sparse Jacobian). The omitted live-
+  divisor entry is bounded, hence harmless at Rung 4; `121` is correct, converges better,
+  and is ~4× faster than FD-complete. Coag-off stays `121` (nmgc / equivalence.sh).
+- The FD-complete path is retained as the **Rung 5 verification oracle**, reached
+  explicitly via `NEMO_ORACLE_MF` (e.g. `NEMO_ORACLE_MF=22`), never the production default.
+  Rung 5 retargets production coag-on to `021` (analytic-complete) with `022` as the
+  oracle it is verified against. The selector (`solver_method_flag`) keeps that seam.
+
+**Gate 4-I retracted; replaced by a static structural check.** Byte-identity of
+numerical vs symbolic is vacuous under MOSS=1. Gate (a) is now a direct assertion that the
+live-divisor entries are present in the finalised symbolic CSC pattern
+(`assert_live_divisor_in_pattern`).
+
+**Gate results (20-bin fiducial grid).**
+- **(a) structural completeness — PASS.** 12720 live-divisor entries present in the pattern.
+- **(b) correctness at scale — PASS.** `mf=022`-complete integrates and conserves (3a) at
+  20 bins; production `121` vs oracle `022` agree to <1% for all species with abundance
+  >1e-8 (max 0.24% in a clean regime), zero species >1%. Under matched method (`121`) the
+  complete pattern is byte-identical to the pre-Rung-4 pattern (provably inert under
+  MOSS=1). Residual >1% differences are confined to the free electron at ~1e-14 (near-total
+  neutralisation; charge-balance residual at the FD-vs-analytic noise floor).
+- **(c) load-bearing convergence — RETRACTED.** It expected a convergence payoff from a
+  bounded (floored) term. Measured directly in a regime where the smallest bin depletes
+  ~10⁶×: completing the block gives no improvement (FD-complete NST/NFE/NJE/restarts
+  16938/289371/1004/11 vs FD-incomplete 16602/273114/950/7), and analytic `121` is fastest
+  and most robust (4 restarts, 28 s). This is the correct behaviour of a bounded term; the
+  payoff is a Rung 5 phenomenon (the stiff reciprocal).
+- **3b/3c at 20 bins — PASS on production `121`.** 3c (directional): dust-core mass and
+  surface ice both migrate to larger bins. 3b (slow-coag reduction): PASS with a caveat —
+  the gate's hard-coded slow-K0 points (5e-18/5e-19), tuned for the 3–5 bin fixture, fall
+  **below the 20-bin solver noise floor** (~rtol=1e-4), so the linearity ratio is
+  unresolved there; with K0 re-tuned above the floor (5e-16/5e-17) the reduction is linear
+  (rA/rB = 9.85 ≈ 10). Byte-identical to committed HEAD, so not a regression — the gate's
+  K0 constants need scaling for the finer grid (test-instrumentation follow-up, tracked for
+  the gate harness, not a code change).
+
+**Tractability (4-IV), 20-bin fiducial.** Production `mf=121` ≈ 28 s; FD-complete oracle
+`mf=022` ≈ 118 s (~4.2×). FD is the slow Jacobian, so this bounds Rung 5's analytic path
+from above: if the oracle is tractable, analytic certainly is.

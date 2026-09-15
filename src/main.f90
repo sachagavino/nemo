@@ -58,7 +58,7 @@ PROGRAM nmgc
   integer :: itask = 1 !< ITASK = 1 for normal computation of output values of Y at t = TOUT.
   integer :: istate = 1 !< ISTATE = integer flag (input and output). Set ISTATE = 1.
   integer :: iopt = 1 !< IOPT = 1 to indicate optional inputs are used.
-  integer :: mf = 121 !< method flag. 121: stiff (BDF) method, user-supplied sparse Jacobian
+  integer :: mf !< DLSODES method flag; set by solver_method_flag() after init (production 121; FD-complete 022 only via NEMO_ORACLE_MF)
   real(double_precision) :: atol = 1.d-99 !< absolute tolerance parameter
 
   real(double_precision) :: output_timestep !< Timestep to reach the next output time [s]
@@ -69,6 +69,12 @@ PROGRAM nmgc
 
   real(double_precision) :: code_start_time, code_current_time, code_elapsed_time
   real(double_precision) :: remaining_time !< estimated remaining time [s]
+
+  ! Rung 4 solver characterization (4-IV cost + convergence effort): accumulated across all DLSODES calls.
+  integer(kind=8) :: tot_nst = 0  !< total accepted steps (IWORK(11))
+  integer(kind=8) :: tot_nfe = 0  !< total RHS evaluations (IWORK(12))
+  integer(kind=8) :: tot_nje = 0  !< total Jacobian evals / LU decompositions (IWORK(13))
+  integer(kind=8) :: tot_fail = 0 !< number of DLSODES calls returning istate /= 2
 
   integer :: i, ic_i !< For loops
   character(2) :: c_i !< to convert the grain rank encoded in a species name into an integer
@@ -93,6 +99,9 @@ PROGRAM nmgc
     call write_banner()
 
     call init_gasgrain()
+
+    ! Select the DLSODES method flag now that the coagulation switch is known.
+    mf = solver_method_flag()
 
     call initialize_work_arrays()
 
@@ -262,6 +271,14 @@ PROGRAM nmgc
 
     call write_abundances('abundances.tmp')
 
+    ! Rung 4 solver characterization (4-IV cost + convergence effort; oracle vs production).
+    write(stdo,'(a)')    ' --- DLSODES solver statistics (Rung 4 characterization) ---'
+    write(stdo,'(a,i0)') '   method flag mf              = ', mf
+    write(stdo,'(a,i0)') '   steps        NST            = ', tot_nst
+    write(stdo,'(a,i0)') '   RHS evals    NFE            = ', tot_nfe
+    write(stdo,'(a,i0)') '   Jac/LU evals NJE            = ', tot_nje
+    write(stdo,'(a,i0)') '   solver restarts (istate/=2) = ', tot_fail
+
   elseif (do_outputs) then
     inquire(file='abundances.out', exist=isDefined)
     if (.not.isDefined) then
@@ -333,8 +350,14 @@ PROGRAM nmgc
       call dlsodes(get_temporal_derivatives,nb_species,temp_abundances,t,t_stop_step,i_tol,RELATIVE_TOLERANCE,&
       satol,i_task,i_state,i_opt,rwork,lrw,iwork,liw,get_jacobian,m_f)
 
+      ! Accumulate DLSODES step statistics (reset by set_work_arrays each call, so read now).
+      tot_nst = tot_nst + int(iwork(11), 8)
+      tot_nfe = tot_nfe + int(iwork(12), 8)
+      tot_nje = tot_nje + int(iwork(13), 8)
+
       ! Whenever the solver fails converging, print the reason.
       if (i_state.ne.2) then
+        tot_fail = tot_fail + 1
         write(*,*) 'ISTATE = ', I_STATE
       endif
 

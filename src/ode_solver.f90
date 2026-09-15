@@ -194,7 +194,7 @@ subroutine build_symbolic_sparsity()
 use global_variables
 implicit none
 
-integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol
+integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol, d
 integer(kind=8) :: N1
 integer(kind=8), allocatable :: keys(:)
 integer, dimension(MAX_COMPOUNDS) :: reac, comp
@@ -202,6 +202,13 @@ integer :: nreac, ncomp, a, b
 
 no_species = nb_species + 1
 N1 = int(nb_species, 8) + 1_8
+
+! Register declared non-reactant Jacobian couplings (the live-divisor block) before we
+! size the key list. Only active with coagulation: with grains frozen the monolayer
+! divisor is constant, so d(rate)/dY(GRAIN_k) is identically zero and no extra coupling
+! exists. This is the same facility Rung 5 will reuse for the reciprocal GTODN entries.
+NB_DECLARED_JAC_DEPS = 0
+if (coagulation) call build_live_divisor_dependencies()
 
 ! ---- pass 1: upper-bound the number of couplings (duplicates allowed) ----
 ncoup = nb_species                                  ! the diagonal
@@ -215,6 +222,7 @@ do r=1,nb_reactions
   enddo
   ncoup = ncoup + nreac*ncomp
 enddo
+ncoup = ncoup + NB_DECLARED_JAC_DEPS               ! declared non-reactant couplings
 
 allocate(keys(ncoup))
 
@@ -240,6 +248,10 @@ do r=1,nb_reactions
       keys(m) = int(jcol,8)*N1 + int(irow,8)
     enddo
   enddo
+enddo
+do d=1,NB_DECLARED_JAC_DEPS                          ! declared non-reactant couplings
+  m = m + 1
+  keys(m) = int(DECLARED_JAC_COL(d),8)*N1 + int(DECLARED_JAC_ROW(d),8)
 enddo
 do irow=1,nb_species                                ! diagonal
   m = m + 1
@@ -338,6 +350,137 @@ contains
   end subroutine heapsort_i8
 
 end subroutine build_symbolic_sparsity
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief General facility: register a Jacobian coupling (row,col) that does NOT
+!! come from a reaction's reactant/product list, so build_symbolic_sparsity will
+!! include it in the pattern. Duplicates are allowed; they are deduped when the
+!! CSC pattern is built. Out-of-range indices are ignored. Rung 4 uses this for
+!! the live-divisor entries; Rung 5 reuses it for the reciprocal GTODN entries.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine declare_jacobian_dependency(irow, icol)
+use global_variables
+implicit none
+integer, intent(in) :: irow, icol
+integer, allocatable :: tmp(:)
+integer :: cap
+
+if (irow.lt.1 .or. irow.gt.nb_species .or. icol.lt.1 .or. icol.gt.nb_species) return
+
+if (.not.allocated(DECLARED_JAC_ROW)) then
+  allocate(DECLARED_JAC_ROW(64)) ; allocate(DECLARED_JAC_COL(64))
+  NB_DECLARED_JAC_DEPS = 0
+endif
+
+cap = size(DECLARED_JAC_ROW)
+if (NB_DECLARED_JAC_DEPS.ge.cap) then
+  allocate(tmp(2*cap)) ; tmp(1:cap) = DECLARED_JAC_ROW ; call move_alloc(tmp, DECLARED_JAC_ROW)
+  allocate(tmp(2*cap)) ; tmp(1:cap) = DECLARED_JAC_COL ; call move_alloc(tmp, DECLARED_JAC_COL)
+endif
+
+NB_DECLARED_JAC_DEPS = NB_DECLARED_JAC_DEPS + 1
+DECLARED_JAC_ROW(NB_DECLARED_JAC_DEPS) = irow
+DECLARED_JAC_COL(NB_DECLARED_JAC_DEPS) = icol
+
+return
+end subroutine declare_jacobian_dependency
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Rung 4 populator: declare the live-divisor Jacobian couplings. Any
+!! reaction associated with grain bin k (GRAIN_RANK(r)=k) may have a surface rate
+!! that reads the live monolayer divisor SUMLAY(k) = ab_tot(k)/(Y(GRAIN_k0)+Y(GRAIN_k-)),
+!! making its rate depend on both grain charge states. We take the safe superset
+!! (design decision): every compound of every bin-k reaction couples to GRAIN_k0
+!! and GRAIN_k-. This is a strict superset of the true SUMLAY-reading set
+!! (accretion of H/H2 via sticking, photodesorption types 66/67 via the monolayer
+!! cap); extra structural zeros are harmless and robust to later rate changes.
+!! The entries are unconditional on floor state -- the pattern is about which
+!! entries CAN be nonzero, not their value at any given state.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine build_live_divisor_dependencies()
+use global_variables
+implicit none
+integer :: r, s, k, sid
+
+NB_DECLARED_JAC_DEPS = 0
+
+do r=1,nb_reactions
+  k = GRAIN_RANK(r)
+  if (k.lt.1 .or. k.gt.nb_grains) cycle
+  if (INDGRAIN(k).lt.1) cycle
+  do s=1,MAX_COMPOUNDS
+    sid = REACTION_COMPOUNDS_ID(s,r)
+    if (sid.lt.1 .or. sid.gt.nb_species) cycle
+    call declare_jacobian_dependency(sid, INDGRAIN(k))
+    if (INDGRAIN_MINUS(k).ge.1) call declare_jacobian_dependency(sid, INDGRAIN_MINUS(k))
+  enddo
+enddo
+
+return
+end subroutine build_live_divisor_dependencies
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Rung 4 gate (a): STATIC structural-completeness check. Verify directly
+!! that every live-divisor coupling is present in the finalised symbolic CSC
+!! pattern (IA_SYM/JA_SYM). This is a direct pattern check -- it certifies that
+!! the declared entries survived the sort/dedup/CSC pipeline and the INDGRAIN
+!! indexing, independently of any run. Replaces the retracted byte-identity 4-I.
+!! Fatal if any entry is missing.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine assert_live_divisor_in_pattern()
+use global_variables
+use iso_fortran_env, only: error_unit
+implicit none
+integer :: r, s, k, sid, c, col, p, nchk, nmiss
+logical :: found
+
+if (.not.coagulation) return
+if (sparsity.ne.'symbolic') return
+if (.not.allocated(IA_SYM)) then
+  write(error_unit,*) 'FATAL (gate a): symbolic pattern not built before completeness check.'
+  stop 1
+endif
+
+nchk = 0 ; nmiss = 0
+do r=1,nb_reactions
+  k = GRAIN_RANK(r)
+  if (k.lt.1 .or. k.gt.nb_grains) cycle
+  do s=1,MAX_COMPOUNDS
+    sid = REACTION_COMPOUNDS_ID(s,r)
+    if (sid.lt.1 .or. sid.gt.nb_species) cycle
+    do c=1,2
+      if (c.eq.1) then
+        col = INDGRAIN(k)
+      else
+        col = INDGRAIN_MINUS(k)
+      endif
+      if (col.lt.1) cycle
+      found = .false.
+      do p=IA_SYM(col), IA_SYM(col+1)-1
+        if (JA_SYM(p).eq.sid) then
+          found = .true. ; exit
+        endif
+      enddo
+      nchk = nchk + 1
+      if (.not.found) then
+        nmiss = nmiss + 1
+        if (nmiss.le.10) write(error_unit,'(a,i0,a,i0,a)') &
+          '   missing live-divisor entry (row=', sid, ', col=', col, ')'
+      endif
+    enddo
+  enddo
+enddo
+
+if (nmiss.gt.0) then
+  write(error_unit,'(a,i0,a,i0,a)') 'FATAL (gate a): symbolic pattern missing ', nmiss, &
+    ' of ', nchk, ' live-divisor entries.'
+  stop 1
+endif
+write(*,'(a,i0,a)') ' (gate a) live-divisor structural completeness: PASS (', nchk, &
+  ' entries present in symbolic pattern).'
+
+return
+end subroutine assert_live_divisor_in_pattern
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @brief Debug guard: assert every numerically-nonzero Jacobian entry at the

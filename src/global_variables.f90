@@ -471,6 +471,15 @@ integer, allocatable, dimension(:) :: IA_SYM !< dim(nb_species+1) column pointer
 integer, allocatable, dimension(:) :: JA_SYM !< row indices of the symbolic pattern (CSC), ascending within each column
 integer :: NNZ_SYM = 0                        !< number of nonzeros in the symbolic pattern
 integer :: n_sparsity_checks_done = 0         !< how many startup subset-asserts have run
+! Declared non-reactant Jacobian dependencies (Rung 4). These are (row,col) couplings
+! that do NOT arise from a reaction's reactant/product list -- e.g. a surface rate that
+! reads the live monolayer divisor SUMLAY(k) depends on Y(GRAIN_k0)/Y(GRAIN_k-) although
+! GRAIN_k is not a reactant of that reaction. build_symbolic_sparsity merges these into
+! the pattern before the CSC is finalised. Duplicates are allowed (deduped downstream).
+! Kept general so Rung 5's reciprocal GTODN entries reuse the same facility.
+integer, allocatable, dimension(:) :: DECLARED_JAC_ROW !< rows of declared non-reactant Jacobian couplings
+integer, allocatable, dimension(:) :: DECLARED_JAC_COL !< cols (differentiation variable) of declared couplings
+integer :: NB_DECLARED_JAC_DEPS = 0          !< number of declared couplings currently registered
 
 ! Diffusion and 1D variables
 real(double_precision) :: X_IONISATION_RATE !< Ionisation rate due to X-rays [s-1]
