@@ -40,41 +40,66 @@ So Rung 4 has **three** jobs, not one:
    sizing is already generous — `mf` selection is the only change needed to activate it.
 2. **Complete the pattern** — add the live-divisor structural entries via a general
    declared-dependency facility (§2), reused by Rung 5.
-3. **Supply the missing values by finite difference** (`MITER=2`), which fills every pattern
-   entry from the RHS — and the RHS *does* depend on `Y(GRAIN_k)` through SUMLAY, so the
-   live-divisor values appear correctly with no analytic-reciprocal derivation.
+3. **Build the FD-complete path (`MITER=2`) as the Rung 5 verification oracle.** FD fills
+   every pattern entry from the RHS, and the RHS *does* depend on `Y(GRAIN_k)` through
+   SUMLAY, so the live-divisor values appear correctly with no analytic derivation — an
+   independent Jacobian to check Rung 5's analytic entries against. **This is built and
+   gate-verified, but is not the production default** (§0.1): production coag-on stays on
+   `mf=121`.
 
 **This rung does not touch the RHS and does not add analytic reciprocal Jacobian terms.**
 Extending `get_jacobian` for the reciprocal `d(rate)/dY(GRAIN_k)` is **Rung 5** (see §1.2).
 
-### 0.1 Why this is a hard blocker, not tidiness
+### 0.1 What Rung 4 does and does NOT buy (corrected after the gate-c finding)
 
-At the physical fiducial config (`initial_dtg_mass_ratio = 1e-2`, 20 bins, coag on), the
-incomplete Jacobian causes repeated `ISTATE=-4` error-test failures in **both** `mf=121`
-and `mf=022` — because with the incomplete *pattern*, FD cannot fill entries the pattern
-omits. So the physical fiducial config **cannot currently run**. Completing the Jacobian is
-what unblocks it. This is the load-bearing "before" picture for the gate (§5, gate c).
+Rung 4 is **plumbing that pays off at Rung 5**, not a convergence win in itself. This was
+established empirically after the plumbing was built (the gate-c experiment, below), and
+it corrects an earlier misframing in this brief:
+
+- The physical fiducial config is **not** blocked. `mf=121` (incomplete analytic) runs it
+  to 10⁶ yr in ~28 s with ~4 recoverable restarts and the **correct answer**. The
+  occasional `ISTATE=-4` are recovered restarts, not a wall.
+- **Completing the live-divisor block gives no convergence improvement** at Rung 4, and FD
+  is ~4× slower. Measured, nominal `k0=1e-9`, physical dtg, 10⁶ yr (smallest bin depletes
+  ~10⁶×, genuinely load-bearing): FD-complete 11 restarts/118 s; FD-incomplete 7/116 s;
+  `mf=121` 4/28 s — all same answer.
+- **Why:** the Rung 4 live divisor is the *monolayer-counting* site, and it is **floored**
+  (`1/max(Y⁰+Y⁻, floor)`). The floor caps it, so `d(SUMLAY)/dY(GRAIN_k) → 0` once a bin
+  depletes — a **bounded** entry, not the stiff `−1/Y²` reciprocal. It feeds only bounded
+  effects (photodesorption cap, saturating sticking). Every surface-*rate* GTODN is still
+  frozen. The stiff reciprocal the paper says "matters at scale" is **Rung 5's dynamic
+  GTODN**, not active here. The floor doing its job is exactly why there is no stiffness
+  and no payoff at Rung 4 — a feature, not a defect.
+
+So Rung 4's value is: the declared-dependency facility (reused by Rung 5's ~23 sites), the
+complete symbolic pattern (needed by Rung 5's analytic path), the MOSS=0 wiring, and the
+**FD-complete path built and gate-verified as the Rung 5 verification oracle.** The
+convergence payoff arrives with Rung 5's analytic reciprocal, verified against this oracle.
 
 ---
 
 ## 1. Decisions locked (do not relitigate)
 
-1. **The fork is resolved as a sequence: Rung 4 = finite-difference, Rung 5 = analytic.**
-   Rung 4 completes the *structure* (symbolic, MOSS=0) and fills *values* by FD (MITER=2).
-   FD is complete (no missing entries), so it does not violate the paper's objection, which
-   is against *missing* entries, not FD ones. Rung 5 then extends `get_jacobian` analytically
-   for all reciprocal terms at once (live divisor + the ~23 GTODN sites — same class),
-   verifies each against Rung 4's FD path, and switches production to analytic for speed.
-   The FD path is retained permanently as the FD-vs-analytic verification oracle.
+1. **The fork is resolved as a sequence: Rung 4 builds the FD path; Rung 5 makes it
+   analytic. Production coag-on stays on `mf=121` until Rung 5.** Rung 4 completes the
+   *structure* (symbolic, MOSS=0) and builds the FD-complete path (`mf=022`), gate-verified
+   as the Rung 5 oracle — but does **not** make FD the production default, because it is a
+   ~4× regression with no correctness or convergence benefit at Rung 4 (the live-divisor
+   term is bounded; §0.1). An inexact analytic Jacobian (`mf=121`) still converges to the
+   true RHS solution and does so faster and more robustly here. Rung 5 then extends
+   `get_jacobian` analytically for all reciprocal terms at once (live divisor + the ~23
+   GTODN sites — same class), verifies each against this rung's FD oracle, and switches
+   production coag-on to `mf=021`. The FD path is retained permanently as the oracle.
 2. **Analytic reciprocal Jacobian entries are Rung 5, not here.** Rung 4 does structure +
-   MOSS=0 wiring + FD values only. No `get_jacobian` extension for the reciprocal term.
-3. **`mf` is conditional on the coagulation switch, not global.** coag on → `022`
-   (MOSS=0/METH=2/MITER=2 FD); coag off → `121` (MOSS=1/MITER=1 analytic, nmgc-compatible).
-   This is semantically correct: coag off ⟹ grains constant ⟹ the live-divisor term is
-   identically inactive ⟹ the complete Jacobian is not needed and `121` is both correct and
-   sufficient. Implement as one small selector function so Rung 5 can retarget the coag-on
-   branch to `021` and add a verification override in one place. **No explicit `mf` parameter
-   yet** (it would let a user set coag-on + `121` and resurrect the ISTATE=-4 failures).
+   MOSS=0 wiring + the FD-complete oracle only. No `get_jacobian` extension for the
+   reciprocal term.
+3. **`mf` selector keyed on the coagulation switch; production coag-on = `121` at Rung 4.**
+   coag off → `121` (nmgc-compatible). coag on production → `121` for now (correct, fastest,
+   most robust; the missing entry is bounded so harmless). The **`022` FD-complete path is
+   invoked explicitly by the gate/oracle harness**, not the production default. Implement as
+   one small selector so Rung 5 retargets production coag-on to `021` with `022` as the
+   oracle, in one place. **No explicit production `mf` parameter** (it would let a user set
+   coag-on + a wrong `mf`); the oracle mode is a test-harness selection, not a user knob.
 4. **`get_jacobian` is kept, dormant under coag-on** (FD fills values there), live under
    coag-off (the nmgc/`121` path). Rung 5 revives it for coag-on.
 5. **`equivalence.sh` stays on coag-off → `121`** and remains bit-identical to nmgc-2.0
@@ -129,8 +154,9 @@ are fatal, extra ones are not.
 
 ## 4. What to build (one bisectable commit)
 
-1. **`mf` selector** keyed on the coagulation switch: coag→`022`, else→`121` (§1, decision 3).
-   Single function, structured for Rung 5's override.
+1. **`mf` selector** keyed on the coagulation switch (§1, decision 3): coag-off → `121`;
+   coag-on production → `121`; the `022` FD-complete path reachable as an explicit
+   gate/oracle mode. Single function, structured for Rung 5's retarget to `021`.
 2. **Declared-dependency facility** in `build_symbolic_sparsity` + the GRAIN_RANK superset
    population (§2). General and reusable.
 3. **Diagnostics at scale:** carry the Rung 3 3a diagnostics (dust-core mass over both
@@ -150,34 +176,40 @@ entries, probed at an **early, unfloored** state (§ landmine 4). Together these
 retracted byte-identity gate: structural check certifies the live-divisor block, subset
 certifies the reactant-derived block.
 
-**(b) Complete-Jacobian correctness at scale.** With `mf=022` + the complete pattern, the
-fiducial coupled model **integrates to completion** (the `ISTATE=-4` "before" is gone),
-**conserves 3a** (dust-core mass both charges to machine precision; ice-transport operator
-net-zero), and **gives the same answer as the prior run to tight rtol** (RHS unchanged, so
-the solution must not move). If the answer moves past tight rtol, escalate — it means the
-completed pattern changed the physics, which it must not.
+**(b) Oracle correctness at scale.** With `mf=022` (FD-complete, the oracle mode), the
+fiducial coupled model **integrates to completion**, **conserves 3a** (dust-core mass both
+charges to machine precision; ice-transport operator net-zero), and **gives the same answer
+as the production `mf=121` run to tight rtol** (same RHS, so the solution must not move).
+This certifies the FD-complete path as a valid independent Jacobian — the property Rung 5
+needs it for. If the `022` and `121` answers diverge past tight rtol, escalate: the
+completed pattern would be perturbing the solution, which it must not.
 
-**(c) Load-bearing demonstration.** Report DLSODES step stats at the **physical fiducial**
-config, showing the complete pattern removes the `ISTATE=-4` failures / reduces step
-rejections versus the incomplete pattern — **same answer, better convergence.** The "before"
-is already measured (incomplete: `mf=121` 5×ISTATE=-4/27 s, `mf=022` 7×/109 s). The "after"
-must converge cleanly. If it does **not** — if the complete FD pattern still fails to
-converge at physical dtg — that is the escalation the design thread asked for: the FD-path
-bet needs rethinking, stop and report.
+**(c) [RETRACTED — do not gate on this.]** This gate originally required the complete
+pattern to *improve convergence* versus the incomplete one. It does not, and should not, at
+Rung 4: the live-divisor term is **floored and therefore bounded**, not the stiff `−1/Y²`
+reciprocal, so completing it yields no convergence payoff (measured: FD-complete 11
+restarts/118 s vs `mf=121` 4/28 s, same answer). That payoff belongs to **Rung 5's**
+dynamic-GTODN reciprocal. The correct Rung 4 expectation is the opposite: **do not require
+`022` to beat `121`** — it will not, and that is the floor working as designed. Instead,
+**report** the step stats (`nst`/`nfe`/`nje` + failure counts) for `mf=121` (production) and
+`mf=022` (oracle) side by side, as the documented baseline Rung 5 will improve upon.
 
 **(d) Regression + tractability.** 3b (slow-coag reduction, ≥2 K0, floor-never-triggered)
 and 3c (nominal directional; expect more temperature-smear structure at 20 bins — physics,
-not failure) still pass at the fiducial grid. Report the FD-Jacobian wall-clock (the 4-IV
-upper bound; recon: ~4× the RHS-only cost — analytic Rung 5 will beat it). If FD is
-tractable, analytic certainly is; if FD is intractable, escalate before approximating.
+not failure) still pass at the fiducial grid, **on the production `mf=121` path**. Report
+wall-clock for both `mf=121` (~28 s, production) and `mf=022` (~118 s, oracle upper bound);
+analytic Rung 5 will beat the FD number. If `mf=121` is tractable (it is), production is
+fine; the FD number bounds Rung 5 from above. Escalate only if the `022` oracle fails to
+integrate or disagrees with `121` past tight rtol.
 
 ---
 
 ## 6. Landmine checklist (Rung 4-specific)
 
-1. **A pattern slot is not a Jacobian value.** The live-divisor entry needs its *value* to
-   reach Newton; under Rung 4 that value comes from FD (MITER=2), not from `get_jacobian`.
-   Do not "add the entry to the pattern" and assume it is live — verify via gate (c).
+1. **A pattern slot is not a Jacobian value.** The live-divisor entry only reaches Newton
+   when its *value* is supplied — by FD (`mf=022`, the oracle) or, at Rung 5, analytically.
+   Under production `mf=121` the entry is absent, which is *acceptable at Rung 4* because the
+   term is bounded (§0.1). Do not assume adding the pattern slot alone makes it live.
 2. **MOSS=0 is mandatory, not optional.** MOSS=1 rediscovers structure from `get_jacobian`
    at the init state and drops entries that are value-zero at discovery (SUMLAY=0 before ice
    forms; floored bins). That state-dependence is the exact fragility the symbolic pattern
