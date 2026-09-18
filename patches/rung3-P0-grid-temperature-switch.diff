@@ -1,0 +1,170 @@
+diff --git a/inputs/parameters.in b/inputs/parameters.in
+index 8e495bf..e1e2fa5 100644
+--- a/inputs/parameters.in
++++ b/inputs/parameters.in
+@@ -52,8 +52,8 @@ uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference fl
+ ! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
+ ! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
+ dust_grid_source = derived ! derived | tabulated
+-grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
+-! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
++derived_temperature = size_scaled ! size_scaled | gas (derived grid only; tabulated grid takes Td from the table column)
++! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;
+ ! gas: Tgrain = Tgas.
+ a_min =  5.000E-07 ! [cm] smallest representative grain radius (5 nm)
+ a_max =  5.000E-05 ! [cm] largest representative grain radius (0.5 um)
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index 23d0c1c..e0b24da 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -75,19 +75,28 @@ get_structure_properties => get_structure_properties_fixed
+ ! Initialize grain temperature prescription.
+ !! HOOK (stage 3): these become explicit Td(a) prescriptions evaluated once on
+ !! the size grid, together with T_CR,peak(a).
+-select case(GRAIN_TEMPERATURE_TYPE)
+-  case('fixed_to_dust_size') ! one temperature per size bin
+-    get_grain_temperature => get_grain_temperature_fixed_to_dust_size
+-
+-  case('gas') ! Tgrain = Tgas
+-    get_grain_temperature => get_grain_temperature_gas
+-
+-  case default
+-    write(error_unit,*) 'The GRAIN_TEMPERATURE_TYPE="', trim(GRAIN_TEMPERATURE_TYPE),'" cannot be found.'
+-    write(error_unit,*) 'Values possible : fixed_to_dust_size, gas'
+-    write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
+-    call exit(10)
+-end select
++! dust_grid_source is the single grid switch and sets WHERE per-bin Td comes from:
++! tabulated -> the table column; derived -> the derived_temperature sub-switch
++! (size_scaled = Td(a) via td_of_a; gas = Tgrain=Tgas). The runtime pointer reads the
++! per-bin grain_temp(:) array in every per-bin case (filled by td_of_a on derived, by
++! the table on tabulated) and uses the gas temperature only for derived + gas.
++if (trim(dust_grid_source) == 'tabulated') then
++  get_grain_temperature => get_grain_temperature_fixed_to_dust_size   ! per-bin Td from the table column
++else
++  select case(trim(DERIVED_TEMPERATURE))
++    case('size_scaled') ! Td(a) = reference_dust_temperature*(a/reference_grain_radius)^(-1/6)
++      get_grain_temperature => get_grain_temperature_fixed_to_dust_size
++
++    case('gas')         ! Tgrain = Tgas for every bin
++      get_grain_temperature => get_grain_temperature_gas
++
++    case default
++      write(error_unit,*) 'derived_temperature="', trim(DERIVED_TEMPERATURE),'" not recognised.'
++      write(error_unit,*) 'Values possible (derived grid): size_scaled, gas'
++      write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
++      call exit(10)
++  end select
++endif
+ 
+ ! Init global allocatable arrays. From now on, we can read data files
+ call initialize_global_arrays()
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 4753d1d..c3d5ca5 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -364,7 +364,11 @@ integer, parameter :: MAX_NUMBER_REACTION_TYPE=100 !< Max number of various reac
+ integer, dimension(0:MAX_NUMBER_REACTION_TYPE-1) :: type_id_start !< list of id start for each reaction type given their type number
+ integer, dimension(0:MAX_NUMBER_REACTION_TYPE-1) :: type_id_stop !< list of id stop for each reaction type given their type number
+ 
+-character(len=80) :: GRAIN_TEMPERATURE_TYPE = 'fixed' !< ('fixed', 'fixed_to_dust_size', 'gas') How the grain temperature is set.
++!> Derived-grid grain-temperature choice: 'size_scaled' -> Td(a) via td_of_a
++!! (reference_dust_temperature*(a/reference_grain_radius)^(-1/6)); 'gas' -> Tgrain=Tgas
++!! for every bin. IGNORED when dust_grid_source='tabulated' (Td is the table column).
++!! dust_grid_source is the single grid switch; this is its derived-grid sub-switch.
++character(len=80) :: DERIVED_TEMPERATURE = 'size_scaled'
+ !! STAGE 3: this becomes the name of an explicit Td(a) prescription evaluated once on the size grid.
+ 
+ 
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 1fa9d68..23ca74a 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -414,9 +414,9 @@ use global_variables
+   write(10,'(a)') "!*****************************"
+   write(10,'(a)') "! Grid geometry: mass grid, geometric in mass, from a_min..a_max at mass_ratio."
+   write(10,'(a,a,a)') 'dust_grid_source = ', trim(dust_grid_source), ' ! derived or tabulated (dust_grid_table.in)'
+-  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed_to_dust_size, gas'
+-  write(10,'(a)') '! fixed_to_dust_size: Td = Td(a), one temperature per size bin;'
+-  write(10,'(a)') '! gas: Tgrain = Tgas ;'
++  write(10,'(a,a,a)') 'derived_temperature = ', trim(DERIVED_TEMPERATURE), ' ! size_scaled | gas (derived grid only)'
++  write(10,'(a)') '! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;'
++  write(10,'(a)') '! gas: Tgrain = Tgas ; ignored when dust_grid_source = tabulated (Td from table column)'
+   write(10,'(a,es10.3e2,a)') 'a_min = ', a_min, ' ! [cm] smallest representative grain radius'
+   write(10,'(a,es10.3e2,a)') 'a_max = ', a_max, ' ! [cm] largest representative grain radius'
+   write(10,'(a,es10.3e2,a)') 'mass_ratio = ', mass_ratio, ' ! per-bin mass ratio (<= 2; nb_bins derived from it)'
+@@ -968,8 +968,8 @@ if (isDefined) then
+       case('grain_abundance_floor')                 ! [grains/cm^3] divisor floor; consumed by Rung 3
+         read(value, '(e12.6)') grain_abundance_floor
+       
+-      case('grain_temperature_type')
+-        read(value, *) GRAIN_TEMPERATURE_TYPE
++      case('derived_temperature')
++        read(value, *) DERIVED_TEMPERATURE
+          
+       case default
+         write(*,*) 'Warning: An unknown parameter has been found'
+diff --git a/tests/fixture_dust_coag/parameters.in b/tests/fixture_dust_coag/parameters.in
+index c350053..043174e 100644
+--- a/tests/fixture_dust_coag/parameters.in
++++ b/tests/fixture_dust_coag/parameters.in
+@@ -2,7 +2,7 @@
+ !# for validating the coagulation-ON path and the analytic gates in this sandbox.
+ is_3_phase = 0
+ preliminary_test = 0
+-grain_temperature_type = fixed_to_dust_size
++derived_temperature = size_scaled ! size_scaled | gas (derived grid)
+ is_grain_reactions = 0
+ dust_grid_source = derived
+ dust_ic = MRN
+diff --git a/tests/fixture_ice_fiducial/parameters.in b/tests/fixture_ice_fiducial/parameters.in
+index c350053..043174e 100644
+--- a/tests/fixture_ice_fiducial/parameters.in
++++ b/tests/fixture_ice_fiducial/parameters.in
+@@ -2,7 +2,7 @@
+ !# for validating the coagulation-ON path and the analytic gates in this sandbox.
+ is_3_phase = 0
+ preliminary_test = 0
+-grain_temperature_type = fixed_to_dust_size
++derived_temperature = size_scaled ! size_scaled | gas (derived grid)
+ is_grain_reactions = 0
+ dust_grid_source = derived
+ dust_ic = MRN
+diff --git a/tests/fixture_ice_transport/parameters.in b/tests/fixture_ice_transport/parameters.in
+index aecbf9b..fa5665f 100644
+--- a/tests/fixture_ice_transport/parameters.in
++++ b/tests/fixture_ice_transport/parameters.in
+@@ -2,7 +2,7 @@
+ !# for validating the coagulation-ON path and the analytic gates in this sandbox.
+ is_3_phase = 0
+ preliminary_test = 0
+-grain_temperature_type = fixed_to_dust_size
++derived_temperature = size_scaled ! size_scaled | gas (derived grid)
+ is_grain_reactions = 0
+ dust_grid_source = derived
+ dust_ic = MRN
+diff --git a/tests/reference_0D_2grains/README.md b/tests/reference_0D_2grains/README.md
+index ef6f11e..729e2bb 100644
+--- a/tests/reference_0D_2grains/README.md
++++ b/tests/reference_0D_2grains/README.md
+@@ -5,7 +5,7 @@ The case used to prove that the extraction did not change the physics.
+ * 2 grain bins (2.33e-6 cm and 1.04e-3 cm), `multi_grain = 1`
+ * 2-phase (`is_3_phase = 0`)
+ * 1414 species, 20 log-spaced outputs, 1 yr -> 1e5 yr
+-* `grain_temperature_type = fixed_to_dust_size`
++* Td comes from the `dust_grid_table.in` column (tabulated grid; no temperature sub-switch)
+ 
+ Everything else (network, abundances, surface parameters) is the stock
+ nmgc-2.0 input set, taken unmodified.
+diff --git a/tests/reference_0D_2grains/parameters.in b/tests/reference_0D_2grains/parameters.in
+index 94e8f86..336075f 100644
+--- a/tests/reference_0D_2grains/parameters.in
++++ b/tests/reference_0D_2grains/parameters.in
+@@ -17,7 +17,6 @@ is_3_phase = 0 ! 0: 2 phase, 1: 3 phase.  v1 target is 2-phase; the 3-phase path
+ !*****************************
+ 
+ preliminary_test = 0 ! Comprehensive tests before the simulation. Switch off when launching many simulations.
+-grain_temperature_type = fixed_to_dust_size ! fixed_to_dust_size, gas
+ ! fixed_to_dust_size: Td = Td(a), one temperature per size bin;
+ ! gas: Tgrain = Tgas.
+ is_grain_reactions = 1 ! Accretion, grain surface reactions
