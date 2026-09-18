@@ -1,0 +1,424 @@
+From f36f274f6797380bca90c7d76557d5632e48c164 Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Mon, 17 Aug 2026 01:09:06 +0000
+Subject: [PATCH 5/6] Phase II Rung 2: ice initial-condition machinery
+ (area-weighted + override + guard)
+
+Places surface ice on the grid before transport. A user gives ONE total per ice
+species under the base name in abundances.in (e.g. "JCO = 1e-4"); read_abundances
+defers such base-ice names (coagulation on, per-bin form J01<base> present) instead
+of erroring, and dust_ice_place distributes the total across J01<base>..J0N<base>:
+
+  * DEFAULT area-weighted:  X_k = X_total * n_k a_k^2 / sum_j n_j a_j^2, i.e. ice
+    coats surface, giving ~uniform initial monolayer coverage; near-empty bins get
+    negligible ice by construction.
+  * OVERRIDE (surface_ice_distribution.in): "<base> f1..fN" replaces the WHERE for
+    that species only (fractions; the total still comes from abundances.in).
+    Non-listed species stay area-weighted; fractions not summing to 1 are renormalised
+    with a warning.
+  * COVERAGE GUARD (override path only): theta_k = X_k/(n_k * nb_sites_per_grain(k));
+    warns above COAG_ICE_COVERAGE_WARN monolayers (gross implausibility) but does NOT
+    cap -- 2-phase allows multilayers. nb_sites_per_grain is grid-sourced, so the
+    guard needs nothing beyond the grid. The default path cannot trigger it.
+
+Gate (d), tests/coag_ice_ic.{f90,sh}, checked at the init state (exact grain IC):
+  * round-trip sum_k X_k = X_total                         -> 1.4e-16
+  * SHAPE X_k/(n_k a_k^2) constant across bins (proves the area-weighting, not just
+    the total)                                             -> spread 1.7e-16
+  * coverage negative control: override dumping CO on a near-empty top bin WARNS;
+    the area-weighted default on the same grid is SILENT.
+
+Fixture now gives the base total (JCO = 1e-4) exercising the machinery. All prior
+Rung 2 gates unchanged: ice conservation 1.4e-15, dust-mass 3.8e-13, ice rate 3.0e-6,
+eps split hand-check PASS, jac-on-ice 0 bugs. coag-OFF byte-identical (the deferral
+only fires when coagulation is on and the base-ice per-bin form exists).
+---
+ src/dust/dustevolution.f90                | 139 ++++++++++++++++++++++
+ src/gasgrain.f90                          |   5 +
+ src/global_variables.f90                  |   7 ++
+ src/input_output.f90                      |  26 +++-
+ tests/coag_ice_ic.sh                      |  55 +++++++++
+ tests/coag_ice_ic_check.f90               |  63 ++++++++++
+ tests/fixture_ice_transport/abundances.in |   2 +-
+ 7 files changed, 294 insertions(+), 3 deletions(-)
+ create mode 100755 tests/coag_ice_ic.sh
+ create mode 100644 tests/coag_ice_ic_check.f90
+
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index 0906fb2..26dd06d 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -54,6 +54,11 @@ implicit none
+ ! Tolerances for the geometric mass grid (mass_ratio ~ 2, well-separated bins).
+ real(double_precision), parameter :: COAG_MASS_TOL = 1.d-9
+ 
++! Coverage above which the override-path ice IC warns of gross implausibility (e.g.
++! a user dumping ice onto a near-empty bin). 2-phase allows multilayers, so this is
++! well above 1 monolayer -- it flags nonsense, it does not cap.
++real(double_precision), parameter :: COAG_ICE_COVERAGE_WARN = 1.0d2
++
+ ! Base ice species transported by coagulation (e.g. "CO" for J01CO..J0NCO), filled
+ ! by dust_ice_enumerate_bases from the expanded species list at injection time.
+ character(len=11), allocatable :: ice_base_names(:)
+@@ -431,6 +436,140 @@ subroutine dust_coagulation_flux_diag(dropped, total)
+   return
+ end subroutine dust_coagulation_flux_diag
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++! Ice initial-condition placement.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Distribute each deferred base-ice total (from read_abundances) across the
++!! per-bin ice species. DEFAULT is area-weighted, X_k = X_tot * n_k a_k^2 / sum_j
++!! n_j a_j^2, giving ~uniform initial monolayer coverage (ice coats surface). An
++!! optional surface_ice_distribution.in overrides the WHERE (per-bin fractions) for
++!! named species only; the total always comes from abundances.in. Must run after the
++!! grain abundances (n_k) and nb_sites_per_grain (from index_datas) are set.
++subroutine dust_ice_place()
++  implicit none
++  integer :: b, k, idx
++  character(len=11) :: base
++  real(double_precision) :: total, Xk, theta, nk
++  real(double_precision), dimension(nb_grains) :: frac
++  logical :: has_override
++
++  do b = 1, nb_ice_ic
++    base  = ice_ic_base_names(b)
++    total = ice_ic_totals(b)
++
++    call dust_ice_fractions(base, frac, has_override)   ! frac sums to 1
++
++    do k = 1, nb_grains
++      Xk  = total * frac(k)
++      idx = species_index(ice_name(k, base))
++      if (idx > 0) abundances(idx) = Xk
++
++      ! coverage guard: only on the override path (the default cannot pile ice on a
++      ! near-empty bin by construction). theta = molecules-per-grain / sites-per-grain.
++      if (has_override) then
++        nk = abundances(INDGRAIN(k))
++        if (nk > 0.d0 .and. nb_sites_per_grain(k) > 0.d0) then
++          theta = Xk / (nk * nb_sites_per_grain(k))
++          if (theta > COAG_ICE_COVERAGE_WARN) then
++            write(error_unit,'(a,a,a,i0,a,es9.2,a)') ' Warning (ice IC): override put species J', &
++              trim(base), ' on bin ', k, ' at coverage theta = ', theta, &
++              ' monolayers -- physically implausible (not capped).'
++          endif
++        endif
++      endif
++    enddo
++  enddo
++  return
++end subroutine dust_ice_place
++
++!> @brief Per-bin distribution fractions for base ice species. Area-weighted unless
++!! surface_ice_distribution.in supplies an override for this species.
++subroutine dust_ice_fractions(base, frac, has_override)
++  implicit none
++  character(len=*), intent(in) :: base
++  real(double_precision), intent(out) :: frac(nb_grains)
++  logical, intent(out) :: has_override
++  integer :: k
++  real(double_precision) :: denom
++
++  call dust_ice_read_override(base, frac, has_override)
++  if (has_override) return
++
++  ! area-weighted default: proportional to bin surface area n_k a_k^2
++  denom = 0.d0
++  do k = 1, nb_grains
++    denom = denom + abundances(INDGRAIN(k)) * grain_radii(k)**2
++  enddo
++  if (denom <= 0.d0) then
++    frac = 1.d0 / dble(nb_grains)      ! degenerate (no grains): spread evenly
++  else
++    do k = 1, nb_grains
++      frac(k) = abundances(INDGRAIN(k)) * grain_radii(k)**2 / denom
++    enddo
++  endif
++  return
++end subroutine dust_ice_fractions
++
++!> @brief Read per-bin override fractions for a species from surface_ice_distribution.in
++!! (format: "<base> f1 f2 ... fN"). has_override=.false. if the file is absent or has
++!! no line for this species. Fractions summing to /= 1 are renormalised with a warning.
++subroutine dust_ice_read_override(base, frac, has_override)
++  implicit none
++  character(len=*), intent(in) :: base
++  real(double_precision), intent(out) :: frac(nb_grains)
++  logical, intent(out) :: has_override
++  character(len=200) :: line
++  character(len=11) :: nm
++  integer :: k, ios
++  real(double_precision) :: s
++  logical :: isDefined
++
++  has_override = .false.
++  frac = 0.d0
++  inquire(file='surface_ice_distribution.in', exist=isDefined)
++  if (.not. isDefined) return
++
++  open(47, file='surface_ice_distribution.in', status='old', action='read')
++  do
++    read(47, '(a)', iostat=ios) line
++    if (ios /= 0) exit
++    if (len_trim(line) == 0) cycle
++    if (line(1:1) == '!') cycle
++    read(line, *, iostat=ios) nm, (frac(k), k=1,nb_grains)
++    if (ios /= 0) cycle
++    if (trim(nm) == trim(base)) then
++      has_override = .true.
++      exit
++    endif
++  enddo
++  close(47)
++  if (.not. has_override) then
++    frac = 0.d0
++    return
++  endif
++
++  s = sum(frac(1:nb_grains))
++  if (abs(s - 1.d0) > 1.d-6) then
++    write(error_unit,'(a,a,a,es12.5,a)') ' Warning (ice IC): override fractions for J', &
++      trim(base), ' sum to ', s, ' (not 1); renormalising.'
++    if (s > 0.d0) frac = frac / s
++  endif
++  return
++end subroutine dust_ice_read_override
++
++!> @brief Species index for a name, or 0 if absent.
++integer function species_index(nm) result(idx)
++  implicit none
++  character(len=*), intent(in) :: nm
++  integer :: s
++  idx = 0
++  do s = 1, nb_species
++    if (species_name(s) == nm) then
++      idx = s; return
++    endif
++  enddo
++end function species_index
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ ! Guards.
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index 5cfa7bd..6026b59 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -166,6 +166,11 @@ do i=1,nb_grains
+   abundances(INDGRAIN_MINUS(i)) = 0.d0
+ enddo
+ 
++! Place the deferred base-ice totals onto the grid (area-weighted default, or a
++! per-species override), now that the grain populations n_k and nb_sites_per_grain
++! are available. Off unless coagulation is on and abundances.in gave a base-ice total.
++if (coagulation .and. nb_ice_ic > 0) call dust_ice_place()
++
+ !Compute the initial abundance of electrons
+ ! this is particularly needed for 1D simulations since the subroutine check_conservation is not done in 1D
+ 
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 5cb7224..0db4820 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -47,6 +47,13 @@ integer                  :: nb_coag_grain_reactions = 0     !< grain coagulation
+ integer                  :: nb_ice_transport_reactions = 0  !< ice-transport reactions (ordered non-overflow pairs x ice bases)
+ integer                  :: coag_n_ordered_nonoverflow = 0  !< number of ORDERED non-overflow pairs (i,j), i,j=1..N
+ integer                  :: nb_ice_bases = 0                 !< number of base ice species transported by coagulation
++
++! Base-ice initial totals deferred from read_abundances: a user gives a single total
++! per ice species under the base name (e.g. "JCO = 1e-4"); dust_ice_place distributes
++! it across the per-bin species J01CO..J0NCO (area-weighted, or overridden).
++integer                  :: nb_ice_ic = 0
++character(len=11), allocatable, dimension(:) :: ice_ic_base_names !< base name, e.g. "CO"
++real(double_precision), allocatable, dimension(:) :: ice_ic_totals !< total abundance per H
+ integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
+ integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
+ real(double_precision)   :: coag_dropped_flux = 0.d0 !< runtime coagulation collision rate dropped by the top-bin policy
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index f486aff..f7490fe 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -1742,7 +1742,15 @@ if (isDefined) then
+   close(10)
+ endif
+ 
+-! We check if all species in abundances.in exists in the simulation
++! We check if all species in abundances.in exists in the simulation. A base-ice
++! total (e.g. "JCO" giving the TOTAL surface CO) is not itself a per-bin species;
++! when coagulation is on and its per-bin form J01<base> exists, it is DEFERRED to
++! dust_ice_place, which distributes it across J01<base>..J0N<base>.
++if (allocated(ice_ic_base_names)) deallocate(ice_ic_base_names)
++if (allocated(ice_ic_totals))    deallocate(ice_ic_totals)
++allocate(ice_ic_base_names(max(nb_lines,1)), ice_ic_totals(max(nb_lines,1)))
++ice_ic_base_names = ''; ice_ic_totals = 0.d0
++nb_ice_ic = 0
+ do j=1,nb_lines
+   error = 1
+   do i=1,nb_species
+@@ -1750,7 +1758,21 @@ do j=1,nb_lines
+       error = 0 ! The species exist
+     endif
+   enddo
+-  
++
++  if (error.eq.1) then
++    ! deferred base-ice total?  name is "J<base>" (or K) and "J01<base>" is a species
++    if (coagulation .and. (temp_names(j)(1:1).eq.'J' .or. temp_names(j)(1:1).eq.'K')) then
++      do i=1,nb_species
++        if (species_name(i) .eq. (temp_names(j)(1:1)//'01'//trim(temp_names(j)(2:)))) error = 0
++      enddo
++      if (error.eq.0) then
++        nb_ice_ic = nb_ice_ic + 1
++        ice_ic_base_names(nb_ice_ic) = temp_names(j)(2:)          ! base (strip J/K prefix)
++        ice_ic_totals(nb_ice_ic)     = temp_abundances(j)
++      endif
++    endif
++  endif
++
+   if (error.eq.1) then
+     write(*,*) j
+     write(*,*) temp_names
+diff --git a/tests/coag_ice_ic.sh b/tests/coag_ice_ic.sh
+new file mode 100755
+index 0000000..6988926
+--- /dev/null
++++ b/tests/coag_ice_ic.sh
+@@ -0,0 +1,55 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_ice_ic.sh
++#
++# Gate (d) for the ice initial-condition machinery, in two parts:
++#
++#   1. round-trip + shape (tests/coag_ice_ic_check.f90): area-weighted default
++#      distributes each base-ice total X_total across bins as X_k ~ n_k a_k^2, so
++#      sum_k X_k = X_total (round-trip) AND X_k/(n_k a_k^2) is constant (shape).
++#
++#   2. coverage-guard negative control: with a per-species OVERRIDE
++#      (surface_ice_distribution.in) dumping all the ice onto a near-empty top bin,
++#      the coverage guard must WARN; the area-weighted default on the same grid must
++#      be SILENT. (theta is not capped; the guard only flags gross implausibility.)
++#
++# Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++
++echo "[coag_ice_ic] building modules + driver (-O0)..."
++make OPT=-O0 >/tmp/ciic_build.log 2>&1 || { echo "module build FAILED"; tail -30 /tmp/ciic_build.log; exit 3; }
++gfortran -O0 -ffree-line-length-none -Jbuild -Ibuild -c tests/coag_ice_ic_check.f90 -o build/coag_ice_ic_check.o 2>>/tmp/ciic_build.log \
++  || { echo "driver compile FAILED"; tail -30 /tmp/ciic_build.log; exit 3; }
++OBJS="$(ls build/*.o build/dust/*.o 2>/dev/null | grep -vE 'build/main\.o|_check\.o' | tr '\n' ' ')"
++gfortran -O0 build/coag_ice_ic_check.o $OBJS -o bin/coag_ice_ic_check 2>>/tmp/ciic_build.log \
++  || { echo "driver link FAILED"; tail -30 /tmp/ciic_build.log; exit 3; }
++
++fail=0
++
++# ---- part 1: round-trip + shape (MRN grains so bins are all populated) --------
++R1="$(mktemp -d)"; cp tests/fixture_ice_transport/*.in "$R1"/
++( cd "$R1" && "$ROOT/bin/coag_ice_ic_check" ) | tee /tmp/ciic_run.log
++grep -q "RESULT: PASS" /tmp/ciic_run.log || fail=1
++rm -rf "$R1"
++
++# ---- part 2: coverage-guard negative control (monodisperse: bins 2,3 near-empty) --
++mono() { sed 's/^dust_ic = MRN/dust_ic = monodisperse/; s/^stop_time = .*/stop_time =  1.000E+00/; s/^nb_outputs = .*/nb_outputs = 1/' "$1"/parameters.in > "$1"/p && mv "$1"/p "$1"/parameters.in; }
++
++echo "[coag_ice_ic] negative control A: override dumps CO on near-empty bin 3 -> expect WARN"
++RA="$(mktemp -d)"; cp tests/fixture_ice_transport/*.in "$RA"/; mono "$RA"
++printf '! base   f1 f2 f3\nCO   0.0 0.0 1.0\n' > "$RA"/surface_ice_distribution.in
++( cd "$RA" && "$ROOT/bin/nmgc" run > run.log 2>&1 || true )
++if grep -q "Warning (ice IC):" "$RA"/run.log; then echo "   WARN fired (correct)"; else echo "   FAIL: no warning on implausible override"; fail=1; fi
++rm -rf "$RA"
++
++echo "[coag_ice_ic] negative control B: area-weighted default (no override) -> expect SILENT"
++RB="$(mktemp -d)"; cp tests/fixture_ice_transport/*.in "$RB"/; mono "$RB"
++( cd "$RB" && "$ROOT/bin/nmgc" run > run.log 2>&1 || true )
++if grep -q "Warning (ice IC):" "$RB"/run.log; then echo "   FAIL: default path warned"; fail=1; else echo "   silent (correct)"; fi
++rm -rf "$RB"
++
++if [ "$fail" -eq 0 ]; then echo "[coag_ice_ic] PASS"; else echo "[coag_ice_ic] FAIL"; fi
++exit $fail
+diff --git a/tests/coag_ice_ic_check.f90 b/tests/coag_ice_ic_check.f90
+new file mode 100644
+index 0000000..134c2fb
+--- /dev/null
++++ b/tests/coag_ice_ic_check.f90
+@@ -0,0 +1,63 @@
++! ===========================================================================
++! tests/coag_ice_ic_check.f90
++!
++! Gate (d) for the ice initial-condition machinery, checked at the INIT state
++! (before any integration, so grain populations are exactly the IC ones):
++!   round-trip : sum_k X_k = X_total for each base ice species (from abundances.in);
++!   shape      : the area-weighted default distributes X_k proportional to n_k a_k^2,
++!                so X_k/(n_k a_k^2) is CONSTANT across bins (not merely conserving the
++!                total). This is the check that the *shape* is right, not just the sum.
++!
++! Run (no surface_ice_distribution.in present => area-weighted default) via
++! tests/coag_ice_ic.sh. Expected RESULT: PASS.
++! ===========================================================================
++program coag_ice_ic_check
++  use global_variables
++  use gasgrain
++  use dust_evolution
++  implicit none
++  integer :: b, k, idx, nbug
++  character(len=11) :: base
++  real(double_precision) :: tot, Xk, nk, ak, rmean, spread
++  real(double_precision), allocatable :: r(:)
++
++  call init_gasgrain()
++  nbug = 0
++  allocate(r(nb_grains))
++
++  if (nb_ice_ic < 1) then
++    write(*,'(a)') ' RESULT: FAIL (no deferred base-ice total -- abundances.in should give e.g. JCO=...)'
++    call exit(1)
++  endif
++
++  write(*,'(a)') '=================================================================='
++  write(*,'(a)') ' Ice-IC gate (d): area-weighted round-trip + shape (init state)'
++  write(*,'(a)') '=================================================================='
++  do b = 1, nb_ice_ic
++    base = ice_ic_base_names(b)
++    tot  = 0.d0
++    do k = 1, nb_grains
++      idx = species_index(ice_name(k, base))
++      Xk  = abundances(idx)
++      nk  = abundances(INDGRAIN(k))
++      ak  = grain_radii(k)
++      r(k) = Xk / (nk * ak*ak)
++      tot  = tot + Xk
++    enddo
++    rmean  = sum(r) / dble(nb_grains)
++    spread = (maxval(r) - minval(r)) / rmean
++    write(*,'(a,a,a,es20.12,a,es9.2)') ' J', trim(base), &
++      ': sum_k X_k = ', tot, '   round-trip rel-err = ', abs(tot - ice_ic_totals(b))/ice_ic_totals(b)
++    write(*,'(a,es9.2,a)') '   shape  X_k/(n_k a_k^2) spread = ', spread, '  (area-weighted => ~0)'
++    if (abs(tot - ice_ic_totals(b))/ice_ic_totals(b) > 1.d-10) nbug = nbug + 1
++    if (spread > 1.d-10) nbug = nbug + 1
++  enddo
++
++  write(*,'(a,i0)') ' bugs = ', nbug
++  if (nbug == 0) then
++    write(*,'(a)') ' RESULT: PASS'
++  else
++    write(*,'(a)') ' RESULT: FAIL'
++    call exit(1)
++  endif
++end program coag_ice_ic_check
+diff --git a/tests/fixture_ice_transport/abundances.in b/tests/fixture_ice_transport/abundances.in
+index ef25a10..11d3754 100644
+--- a/tests/fixture_ice_transport/abundances.in
++++ b/tests/fixture_ice_transport/abundances.in
+@@ -1,4 +1,4 @@
+ ! Abundances relative to H
+ He          = 9.000000D-02
+ H2          = 5.000000D-01
+-J01CO       = 1.000000D-04
++JCO         = 1.000000D-04
+-- 
+2.43.0
+

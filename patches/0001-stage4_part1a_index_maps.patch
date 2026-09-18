@@ -1,0 +1,297 @@
+From c93e992bca52d20bee3e1416f66ab90619169ce9 Mon Sep 17 00:00:00 2001
+From: Sacha Gavino <sacha.gavino@gmail.com>
+Date: Fri, 7 Aug 2026 22:04:30 +0000
+Subject: [PATCH] Stage 4 Part 1a: precompute grain-rank / phase / ice index
+ maps
+
+set_dependant_rates and get_temporal_derivatives recovered a grain bin rank on
+every RHS call by slicing species names and re-parsing them with
+read(c_i,'(I2)') -- a formatted internal read run thousands of times per step --
+and by re-classifying each surface species with a chain of string comparisons.
+All of that is a pure function of the species/reaction list, so it is now
+precomputed once at init.
+
+build_index_maps() (called after read_reactions) fills four lookups:
+  SPECIES_GRAIN_RANK(nb_species)     grain rank from species_name(i)(2:3), J/K
+  SPECIES_PHASE(nb_species)          1 = surface (J), 2 = mantle (K), 0 = other
+  SPECIES_ICE_CODE(nb_species)       0 none / 1 CO / 2 H2O / 3 NH3 / 4 CO2 /
+                                     5 CH4 / 6 CH3OH, mirroring the (4:11) tests
+  REACTION_C4_GRAIN_RANK(nb_reactions) rank of product slot 4, for the ER/CIR
+                                     accretion corrections
+
+The five hot-loop sites (rate_tot accumulation in get_temporal_derivatives; the
+hoping-rate loop; the ab_tot/ab_surf/ab_mant + ice-abundance loop; the three
+Eley-Rideal / complex-induced blocks; the surface/mantle sum in the 3-phase
+routine) now read these maps. Iteration order and every arithmetic operation are
+unchanged, so the RHS is bit-identical; only the per-call name parsing is gone.
+All 15 read(c_i,'(I2)') calls in ode_solver.f90 are removed.
+
+This is Part 1a of two: the IMOD1/IMOD2 tunnelling/modify classification is a
+separate commit (its base-then-modify control flow is isolated on purpose so a
+later bisect can localise it).
+
+Verified byte-identical against the pre-change build on four configurations:
+the tabulated reference case; a derived 4-bin MRN case (abundances.out,
+elemental_abundances.out and dust_distribution.out); and an is_er_cir=1 run that
+exercises the ER/CIR blocks (site 4), which the default is_er_cir=0 cases never
+reach. tests/roundtrip_derived.sh still passes byte-identical.
+---
+ src/gasgrain.f90         |  4 ++
+ src/global_variables.f90 |  9 +++++
+ src/input_output.f90     | 54 +++++++++++++++++++++++++
+ src/ode_solver.f90       | 87 +++++++++++-----------------------------
+ 4 files changed, 91 insertions(+), 63 deletions(-)
+
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index 269acc6..b27eff2 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -85,6 +85,10 @@ call read_species()
+ ! Read list of reactions for gas and grains
+ call read_reactions()
+ 
++! Precompute the per-species / per-reaction grain-rank, phase and ice-species
++! index maps so the RHS need not re-parse species names on every call.
++call build_index_maps()
++
+ ! Read branching ratios for the computation of photorates in the case of disks
+ !if (photo_disk.eq.1) then
+ !    call read_br()
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index b7ed672..6066ca3 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -153,6 +153,15 @@ integer, allocatable, dimension(:) :: INDGRAIN_MINUS !< Index corresponding to G
+ ! integer, dimension(1:nb_grains) :: INDGRAIN_MINUS !< Index corresponding to GRAIN- in nb_species length arrays
+ integer, allocatable, dimension(:) :: GRAIN_RANK ! dim(nb_reactions) it says which size of grain is involved in a particular reaction
+ 
++! ---- stage-4 Part 1: index maps precomputed once at init (build_index_maps) ----
++! These replace per-RHS-call string comparisons and read(c_i,'(I2)') parses in
++! get_temporal_derivatives / set_dependant_rates. They are pure lookups of what
++! that per-call code recomputed every step, so the RHS stays bit-identical.
++integer, allocatable, dimension(:) :: SPECIES_GRAIN_RANK    ! dim(nb_species): grain rank from species_name(i)(2:3) for J/K species, else 0
++integer, allocatable, dimension(:) :: SPECIES_PHASE         ! dim(nb_species): 1 if species_name(i)(1:1)=='J', 2 if 'K', else 0
++integer, allocatable, dimension(:) :: SPECIES_ICE_CODE      ! dim(nb_species): tracked surface ice, 0 none / 1 CO / 2 H2O / 3 NH3 / 4 CO2 / 5 CH4 / 6 CH3OH (J phase only)
++integer, allocatable, dimension(:) :: REACTION_C4_GRAIN_RANK ! dim(nb_reactions): grain rank from REACTION_COMPOUNDS_NAMES(4,i)(2:3) when J/K-prefixed, else 0
++
+ ! 3 phase model
+ REAL(double_precision), allocatable, dimension(:) :: sumlaysurfsave !< Total number of layers on the grain surface
+ ! REAL(double_precision), dimension(1:nb_grains) :: sumlaysurfsave !< Total number of layers on the grain surface
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 8344a11..34db459 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -1492,6 +1492,60 @@ enddo
+ return
+ end subroutine read_reactions
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Precompute, once at init, the per-species and per-reaction grain-rank /
++!! phase / ice-species index maps that get_temporal_derivatives and
++!! set_dependant_rates used to recover on every RHS call via string comparisons
++!! and read(c_i,'(I2)') parses. Each map stores exactly what that per-call code
++!! computed, so substituting a lookup for the parse leaves the RHS bit-identical.
++!! Must be called after read_species and read_reactions (species_name and
++!! REACTION_COMPOUNDS_NAMES populated).
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine build_index_maps()
++use global_variables
++implicit none
++integer :: i
++
++! per-species maps
++if (.not.allocated(SPECIES_GRAIN_RANK)) allocate(SPECIES_GRAIN_RANK(nb_species))
++if (.not.allocated(SPECIES_PHASE))      allocate(SPECIES_PHASE(nb_species))
++if (.not.allocated(SPECIES_ICE_CODE))   allocate(SPECIES_ICE_CODE(nb_species))
++SPECIES_GRAIN_RANK(:) = 0
++SPECIES_PHASE(:)      = 0
++SPECIES_ICE_CODE(:)   = 0
++
++do i=1,nb_species
++  if (species_name(i)(1:1).eq.'J') then
++    SPECIES_PHASE(i) = 1
++    read(species_name(i)(2:3),'(I2)') SPECIES_GRAIN_RANK(i)
++    ! tracked surface ices, mirroring the (4:11) 8-character comparisons exactly
++    if      (species_name(i)(4:11).eq.'CO      ') then ; SPECIES_ICE_CODE(i) = 1
++    else if (species_name(i)(4:11).eq.'H2O     ') then ; SPECIES_ICE_CODE(i) = 2
++    else if (species_name(i)(4:11).eq.'NH3     ') then ; SPECIES_ICE_CODE(i) = 3
++    else if (species_name(i)(4:11).eq.'CO2     ') then ; SPECIES_ICE_CODE(i) = 4
++    else if (species_name(i)(4:11).eq.'CH4     ') then ; SPECIES_ICE_CODE(i) = 5
++    else if (species_name(i)(4:11).eq.'CH3OH   ') then ; SPECIES_ICE_CODE(i) = 6
++    endif
++  else if (species_name(i)(1:1).eq.'K') then
++    SPECIES_PHASE(i) = 2
++    read(species_name(i)(2:3),'(I2)') SPECIES_GRAIN_RANK(i)
++  endif
++enddo
++
++! per-reaction map: grain rank of the first product (compound slot 4), used by the
++! Eley-Rideal / complex-induced accretion corrections. Parsed only where compound
++! 4 is a J/K species (the only reactions that reach those sites); 0 elsewhere.
++if (.not.allocated(REACTION_C4_GRAIN_RANK)) allocate(REACTION_C4_GRAIN_RANK(nb_reactions))
++REACTION_C4_GRAIN_RANK(:) = 0
++do i=1,nb_reactions
++  if (REACTION_COMPOUNDS_NAMES(4,i)(1:1).eq.'J' .or. REACTION_COMPOUNDS_NAMES(4,i)(1:1).eq.'K') then
++    read(REACTION_COMPOUNDS_NAMES(4,i)(2:3),'(I2)') REACTION_C4_GRAIN_RANK(i)
++  endif
++enddo
++
++return
++end subroutine build_index_maps
++
+ 
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @author 
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index 06fb55b..c78f880 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -468,13 +468,12 @@ IF(is_3_phase.eq.1) then
+ rate_tot_acc = 0.0D+00
+ rate_tot_des = 0.0D+00
+ DO i = nb_gaseous_species+1,nb_species
+-   IF((species_name(i)(1:1).ne.'K').and.(species_name(i)(1:1).ne.'J')) THEN
++   IF(SPECIES_PHASE(i).eq.0) THEN
+       PRINT*, "Problem in the computation of rate_tot in get_temporal_derivatives..."
+       stop
+    ENDIF
+-   IF((species_name(i)(1:1).eq.'J')) THEN
+-     c_i = species_name(i)(2:3)  
+-     read(c_i,'(I2)')ic_i
++   IF(SPECIES_PHASE(i).eq.1) THEN
++     ic_i = SPECIES_GRAIN_RANK(i)
+        rate_tot_acc(ic_i) = rate_tot_acc(ic_i) + YDTMP1(i)
+        rate_tot_des(ic_i) = rate_tot_des(ic_i) + YDTMP2(i)
+    ENDIF
+@@ -914,9 +913,8 @@ end subroutine get_temporal_derivatives
+   !-------------------------------------------------------------
+ 
+   do K=1,nb_species
+-    if(species_name(k)(:1)=='J' .or. species_name(k)(:1)=='K') then
+-      c_i = species_name(k)(2:3)  
+-      read(c_i,'(I2)')ic_i
++    if(SPECIES_PHASE(k).ne.0) then
++      ic_i = SPECIES_GRAIN_RANK(k)
+       
+ !       if (grain_radii(ic_i) < 1e-5) then
+ !         CR_PEAK_DURATION = 1.0d-5/(nb_sites_per_grain(ic_i)/1.0d6)
+@@ -1143,54 +1141,23 @@ abCO(1:nb_grains) = 0.d0
+   abCH3OH  = 0.0D+00
+   DO J = nb_gaseous_species+1,nb_species
+ !        ab_tot = ab_tot + Y(j)
+-       IF (species_name(j)(1:1).eq."J") THEN
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
++       ic_i = SPECIES_GRAIN_RANK(j)
++       IF (SPECIES_PHASE(j).eq.1) THEN            ! J: surface
+          ab_tot(ic_i)  = ab_tot(ic_i) + Y(j)
+          ab_surf(ic_i) = ab_surf(ic_i) + Y(j)
+-       ENDIF  
+-       IF (species_name(j)(1:1).eq."K") THEN
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
++       ENDIF
++       IF (SPECIES_PHASE(j).eq.2) THEN            ! K: mantle
+          ab_tot(ic_i)  = ab_tot(ic_i) + Y(j)
+          ab_mant(ic_i) = ab_mant(ic_i) + Y(j)
+        ENDIF
+-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CO      ') then
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
+-         abCO(ic_i)  = Y(J)
+-       ENDIF
+-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'H2O     ') then
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
+-         abH2O(ic_i)  = Y(J)
+-       ENDIF
+-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'NH3     ') then
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
+-         abNH3(ic_i)  = Y(J)
+-       ENDIF
+-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CO2     ') then
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
+-         abCO2(ic_i)  = Y(J)
+-       ENDIF
+-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CH4     ') then
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
+-         abCH4(ic_i)  = Y(J)
+-       ENDIF
+-       IF(species_name(J)(:1).EQ.'J' .AND. species_name(J)(4:11).EQ.'CH3OH   ') then
+-         c_i = species_name(j)(2:3)
+-         read(c_i,'(I2)')ic_i
+-         abCH3OH(ic_i)  = Y(J)
+-       ENDIF
+-!          IF(species_name(J).EQ.'JCO        ') abCO  = Y(J)
+-!          IF(species_name(J).EQ.'JH2O       ') abH2O = Y(J)
+-!          IF(species_name(J).EQ.'JNH3       ') abNH3 = Y(J)
+-!          IF(species_name(J).EQ.'JCO2       ') abCO2 = Y(J)
+-!          IF(species_name(J).EQ.'JCH4       ') abCH4 = Y(J)
+-!          IF(species_name(J).EQ.'JCH3OH     ') abCH3OH = Y(J)
++       SELECT CASE (SPECIES_ICE_CODE(j))          ! tracked surface ices (J only)
++         CASE (1) ; abCO(ic_i)    = Y(J)
++         CASE (2) ; abH2O(ic_i)   = Y(J)
++         CASE (3) ; abNH3(ic_i)   = Y(J)
++         CASE (4) ; abCO2(ic_i)   = Y(J)
++         CASE (5) ; abCH4(ic_i)   = Y(J)
++         CASE (6) ; abCH3OH(ic_i) = Y(J)
++       END SELECT
+   ENDDO
+ 
+   do i=1,nb_grains
+@@ -1473,8 +1440,7 @@ abCO(1:nb_grains) = 0.d0
+ 
+        IF(REACTION_COMPOUNDS_NAMES(1,J) == "C          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "C       " &
+          .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
+-         c_i = REACTION_COMPOUNDS_NAMES(4,J)(2:3)
+-         read(c_i,'(I2)')ic_i
++         ic_i = REACTION_C4_GRAIN_RANK(J)
+           IF(ab_surf(ic_i).le. ab_lay(ic_i)) THEN
+              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
+                (1.0D+00-(abH2O(ic_i)+abCO2(ic_i)+abNH3(ic_i)+abCH3OH(ic_i)+abCH4(ic_i))/ab_lay(ic_i))
+@@ -1486,8 +1452,7 @@ abCO(1:nb_grains) = 0.d0
+ 
+        IF(REACTION_COMPOUNDS_NAMES(1,J) == "CH         " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "CH      " &
+          .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
+-         c_i = REACTION_COMPOUNDS_NAMES(4,J)(2:3)
+-         read(c_i,'(I2)')ic_i
++         ic_i = REACTION_C4_GRAIN_RANK(J)
+           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
+              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J)) * &
+                                                     (1.0D+00-(abH2O(ic_i)+abNH3(ic_i)+abCH3OH(ic_i))/ab_lay(ic_i))
+@@ -1499,8 +1464,7 @@ abCO(1:nb_grains) = 0.d0
+ 
+        IF(REACTION_COMPOUNDS_NAMES(1,J) == "O          " .AND. REACTION_COMPOUNDS_NAMES(4,J)(4:11) == "O       " &
+          .AND. REACTION_COMPOUNDS_NAMES(4,J)(1:1) == "J") THEN
+-         c_i = REACTION_COMPOUNDS_NAMES(4,J)(2:3)
+-         read(c_i,'(I2)')ic_i
++         ic_i = REACTION_C4_GRAIN_RANK(J)
+           IF(ab_surf(ic_i).le.ab_lay(ic_i)) THEN
+              ACCRETION_RATES(reactant_1_idx(J)) = ACCRETION_RATES(reactant_1_idx(J))*(1.0D+00-abCO(ic_i)/ab_lay(ic_i))
+           ELSE
+@@ -1889,15 +1853,12 @@ end if
+   ab_surf = 0.0d0
+   ab_mant = 0.0d0
+   DO J = nb_gaseous_species+1,nb_species
+-    IF (species_name(j)(1:1).eq."J") THEN 
+-      c_i = species_name(j)(2:3)
+-      read(c_i,'(I2)')ic_i
++    ic_i = SPECIES_GRAIN_RANK(j)
++    IF (SPECIES_PHASE(j).eq.1) THEN
+       ab_surf(ic_i) = ab_surf(ic_i) + Y(j)
+     ENDIF
+-    
+-    IF (species_name(j)(1:1).eq."K") THEN
+-      c_i = species_name(j)(2:3)
+-      read(c_i,'(I2)')ic_i
++
++    IF (SPECIES_PHASE(j).eq.2) THEN
+       ab_mant(ic_i) = ab_mant(ic_i) + Y(j)
+     ENDIF  
+   ENDDO
+-- 
+2.43.0
+

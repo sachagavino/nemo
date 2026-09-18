@@ -1,0 +1,224 @@
+From db383a621e13a24bd25945cf5afbc82f4da1edfd Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Sun, 16 Aug 2026 19:25:23 +0000
+Subject: [PATCH 1/6] Phase II Rung 2 (scaffolding): ice-bearing network +
+ bare-kernel factor
+
+Prep for ice transport; no transport reactions yet (ice is defined and inert).
+
+- Lift the Rung-1 coag_assert_ice_free guard: it existed only to defer ice to
+  Rung 2, which is now. An ice-bearing (J-species) coagulating network is henceforth
+  allowed; the transport reactions that make it correct land in the next commit.
+- Factor coag_kernel_bare(i,j) (the kernel WITHOUT the 1/2 self-pair factor) out of
+  coag_kernel. Grain reactions keep the 1/2 on the diagonal (coag_kernel); ice
+  transport will use the bare kernel (full K_ii), because its reactants J_i X and
+  GRAIN_j are distinct and each depleted once. Behaviour-preserving for grains:
+  coag_kernel is unchanged, so all Rung 1/1b gates and coag-OFF byte-identity are
+  unaffected (kernel check, constant + Brownian gates, jac_weight_check all green;
+  13450 entries, worst reldiff 1.8006e-3).
+- New tests/fixture_ice_transport/: 3-bin toy (brief's hand-checkable grid), 4 prime
+  elements (H,He,C,O), inert CO ice as base species JCO (read_species expands to
+  J01CO..J0NCO), all CO initially in bin 1. Confirmed empirically: the chemistry-free
+  fixture inits and integrates with ice present and needs no surface scaffolding
+  beyond the grid -- nb_sites_per_grain is computed from grain_radii + surface_site_
+  density unconditionally, so the coverage guard is grid-sourceable (brief item 3
+  resolved). Dropped-flux warnings on this tiny grid are expected and do not affect
+  ice conservation (skipped-overflow pairs simply don't transport; ice stays put).
+---
+ src/dust/dustevolution.f90                    | 25 ++++++++-
+ tests/fixture_ice_transport/abundances.in     |  4 ++
+ .../activation_energies.in                    |  0
+ tests/fixture_ice_transport/element.in        |  5 ++
+ tests/fixture_ice_transport/gas_reactions.in  |  0
+ tests/fixture_ice_transport/gas_species.in    | 14 +++++
+ .../fixture_ice_transport/grain_reactions.in  |  0
+ tests/fixture_ice_transport/grain_species.in  |  1 +
+ tests/fixture_ice_transport/parameters.in     | 56 +++++++++++++++++++
+ .../surface_parameters.in                     |  0
+ 10 files changed, 102 insertions(+), 3 deletions(-)
+ create mode 100644 tests/fixture_ice_transport/abundances.in
+ create mode 100644 tests/fixture_ice_transport/activation_energies.in
+ create mode 100644 tests/fixture_ice_transport/element.in
+ create mode 100644 tests/fixture_ice_transport/gas_reactions.in
+ create mode 100644 tests/fixture_ice_transport/gas_species.in
+ create mode 100644 tests/fixture_ice_transport/grain_reactions.in
+ create mode 100644 tests/fixture_ice_transport/grain_species.in
+ create mode 100644 tests/fixture_ice_transport/parameters.in
+ create mode 100644 tests/fixture_ice_transport/surface_parameters.in
+
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index eca6242..70b86cc 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -165,7 +165,8 @@ subroutine dust_coagulation_inject_static()
+   real(double_precision) :: w1, w2
+   logical :: is_overflow
+ 
+-  call coag_assert_ice_free()
++  ! (Rung 1's coag_assert_ice_free guard is lifted here: Rung 2 adds ice-transport
++  !  reactions, so an ice-bearing network is now supported rather than forbidden.)
+   call coag_assert_type_unused()
+ 
+   ns = 0
+@@ -243,6 +244,25 @@ end subroutine dust_coagulation_set_rates
+ !! Brownian branch here (selected by coagulation_kernel); nothing else changes.
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ function coag_kernel(i, j) result(kern)
++  implicit none
++  integer, intent(in) :: i, j
++  real(double_precision) :: kern
++  ! GRAIN coagulation rate: the bare kernel with the 1/2 self-pair factor on the
++  ! diagonal (the RHS double-depletes GRAIN_i in a self-reaction, so 1/2*K_ii*2 =
++  ! K_ii). Ice transport must NOT use this 1/2 (its reactants J_i X and GRAIN_j are
++  ! distinct, depleted once each), so it calls coag_kernel_bare directly.
++  kern = coag_kernel_bare(i, j)
++  if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once
++  return
++end function coag_kernel
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Bare coagulation kernel K_ij for the bin pair (i,j), WITHOUT the 1/2
++!! self-pair factor. Single source of truth for the kernel form. Grain reactions
++!! wrap this with the diagonal 1/2 (coag_kernel); ice-transport reactions use it
++!! as-is (full K_ii on the diagonal). Rung 1b adds the Brownian branch here.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++function coag_kernel_bare(i, j) result(kern)
+   implicit none
+   integer, intent(in) :: i, j
+   real(double_precision) :: kern
+@@ -270,9 +290,8 @@ function coag_kernel(i, j) result(kern)
+       trim(coagulation_kernel), '" (v1 supports: constant, brownian).'
+     call exit(31)
+   end select
+-  if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once
+   return
+-end function coag_kernel
++end function coag_kernel_bare
+ 
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @brief Runtime overflow guard. Returns the coagulation collision rate that the
+diff --git a/tests/fixture_ice_transport/abundances.in b/tests/fixture_ice_transport/abundances.in
+new file mode 100644
+index 0000000..ef25a10
+--- /dev/null
++++ b/tests/fixture_ice_transport/abundances.in
+@@ -0,0 +1,4 @@
++! Abundances relative to H
++He          = 9.000000D-02
++H2          = 5.000000D-01
++J01CO       = 1.000000D-04
+diff --git a/tests/fixture_ice_transport/activation_energies.in b/tests/fixture_ice_transport/activation_energies.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_ice_transport/element.in b/tests/fixture_ice_transport/element.in
+new file mode 100644
+index 0000000..8fdd7b4
+--- /dev/null
++++ b/tests/fixture_ice_transport/element.in
+@@ -0,0 +1,5 @@
++! name ; mass(AMU)
++H            1.000
++He           4.000
++C           12.000
++O           16.000
+diff --git a/tests/fixture_ice_transport/gas_reactions.in b/tests/fixture_ice_transport/gas_reactions.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_ice_transport/gas_species.in b/tests/fixture_ice_transport/gas_species.in
+new file mode 100644
+index 0000000..2b15196
+--- /dev/null
++++ b/tests/fixture_ice_transport/gas_species.in
+@@ -0,0 +1,14 @@
++H            0  1  0  0  0
++H2           0  2  0  0  0
++He           0  0  1  0  0
++C            0  0  0  1  0
++O            0  0  0  0  1
++e-          -1  0  0  0  0
++GRAIN0       0  0  0  0  0
++GRAIN-      -1  0  0  0  0
++GRAIN01      0  0  0  0  0
++GRAIN02      0  0  0  0  0
++GRAIN03      0  0  0  0  0
++GRAIN01-    -1  0  0  0  0
++GRAIN02-    -1  0  0  0  0
++GRAIN03-    -1  0  0  0  0
+diff --git a/tests/fixture_ice_transport/grain_reactions.in b/tests/fixture_ice_transport/grain_reactions.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_ice_transport/grain_species.in b/tests/fixture_ice_transport/grain_species.in
+new file mode 100644
+index 0000000..9945640
+--- /dev/null
++++ b/tests/fixture_ice_transport/grain_species.in
+@@ -0,0 +1 @@
++JCO          0  0  0  1  1
+diff --git a/tests/fixture_ice_transport/parameters.in b/tests/fixture_ice_transport/parameters.in
+new file mode 100644
+index 0000000..aecbf9b
+--- /dev/null
++++ b/tests/fixture_ice_transport/parameters.in
+@@ -0,0 +1,56 @@
++!# Rung 1 dust-only coagulation fixture (ice-free, chemistry-off). Fast vehicle
++!# for validating the coagulation-ON path and the analytic gates in this sandbox.
++is_3_phase = 0
++preliminary_test = 0
++grain_temperature_type = fixed_to_dust_size
++is_grain_reactions = 0
++dust_grid_source = derived
++dust_ic = MRN
++a_min =  1.000E-06
++a_max =  1.5876E-06
++mass_ratio =  2.000E+00
++dust_power_law_index = -3.500E+00
++grain_density =  3.000E+00
++coagulation = 1
++coagulation_kernel = constant
++constant_kernel_k0 =  1.000E-09
++is_h2_formation_rate = 0
++is_absorption_h2 = 0
++is_absorption_co = 0
++is_absorption_n2 = 0
++is_photodesorb = 0
++is_crid = 0
++is_er_cir = 0
++grain_tunneling_diffusion = 0
++modify_rate_flag = 0
++sparsity = numerical
++sparsity_check_steps = 0
++conservation_type = 0
++nb_active_lay =  2.000E+00
++initial_gas_density =  2.212E+08
++initial_gas_temperature =  2.741E+01
++initial_visual_extinction =  1.582E+01
++cr_ionisation_rate =  1.300E-17
++x_ionisation_rate =  0.000E+00
++uv_flux =  1.554E+03
++initial_dtg_mass_ratio =  1.000E-02
++sticking_coeff_neutral =  1.000E+00
++sticking_coeff_positive =  0.000E+00
++sticking_coeff_negative =  0.000E+00
++grain_radius =  1.000E-05
++diffusion_barrier_thickness =  1.000E-08
++surface_site_density =  8.000E+14
++diff_binding_ratio_surf =  4.000E-01
++diff_binding_ratio_mant =  8.000E-01
++chemical_barrier_thickness =  1.000E-08
++cr_peak_grain_temp =  7.000E+01
++cr_peak_duration =  1.000E-05
++Fe_ionisation_rate =  3.000E-14
++vib_to_dissip_freq_ratio =  1.000E-02
++ED_H2 =  2.300E+01
++start_time =  1.000E+00
++stop_time =  1.000E+02
++nb_outputs = 5
++output_type = log
++relative_tolerance =  1.000E-04
++minimum_initial_abundance =  1.000E-40
+diff --git a/tests/fixture_ice_transport/surface_parameters.in b/tests/fixture_ice_transport/surface_parameters.in
+new file mode 100644
+index 0000000..e69de29
+-- 
+2.43.0
+

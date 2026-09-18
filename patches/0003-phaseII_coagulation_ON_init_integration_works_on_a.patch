@@ -1,0 +1,463 @@
+From 3c697ce21088c680a64151f34d1189345d2985e7 Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Sat, 15 Aug 2026 12:49:23 +0000
+Subject: [PATCH 2/4] Phase II: coagulation-ON init+integration works on a
+ dust-only fixture
+
+Brings the coagulation path (default-off infrastructure from 1fe51f1) to a
+running, validated state on a small ice-free, chemistry-free fixture -- the
+fast vehicle the full 1414-species network cannot provide (it is too slow to
+integrate here). Coagulation-OFF remains byte-identical: jac_weight_check is
+unchanged (13450 entries, worst reldiff 1.8006e-3, 0 weight bugs).
+
+New fixture tests/fixture_dust_coag/ (generator: scripts-free, see commit body):
+  16-bin derived mass-doubling grid (a_min 1e-6, a_max 3.2e-5, rho 3), MRN IC,
+  coagulation=1 constant kernel K0=1e-9, is_grain_reactions=0, ice-free 2-element
+  (H,He) network, empty reaction/surface files. Coag count fires correctly:
+  120 pair reactions, 16 top-bin overflow pairs skipped (136 = 16*17/2).
+
+Result on the fixture (both -O0/bounds and -O2):
+  * mass Sum m_k n_k conserved to ~5e-16 (machine precision) -- GATE (a) passes;
+  * total grain number decreases (N/N0=0.977 at 100 yr), the two smallest bins
+    deplete and every larger bin grows -- correct coagulation + Podolak/Brauer
+    mass redistribution.
+
+Code changes, each guarded so the stock/default build is byte-identical
+(coagulation flag off, or nb_chemistry_reactions==nb_reactions, or a resolved
+index that is always positive in a full network):
+  * input_output: read `coagulation` as a 0/1 switch (matches is_* convention);
+    accept an empty grain_species.in (ice-free networks have no surface species);
+    bound the reaction reorder + its completeness check to nb_chemistry_reactions
+    (coag block is appended pre-sorted after read_reactions).
+  * gasgrain: bound the four init_reaction_rates chemistry sweeps to
+    nb_chemistry_reactions (coag rates come from dust_coagulation_set_rates);
+    when coagulation is on, turn absent reaction-type ranges into the empty
+    do-loop range [1,0] so the many `do J=type_id_start(T),type_id_stop(T)` rate
+    loops don't run at J=0 on a chemistry-free network; tiling validator now keys
+    on stop==0 (treats [0,0] and [1,0] identically as "type absent").
+  * ode_solver: bound the accretion-prefactor sweep to nb_chemistry_reactions
+    (coag reactions have no reactant_1_idx and don't accrete).
+  * main: guard the self-shielding column densities on a resolved species index
+    so a reduced network doesn't index abundances(0); values are only consumed by
+    H2/CO/N2 self-shielding, which is absent here.
+  * dustevolution: assign each coag reaction a unique high-based REACTION_ID so
+    the duplicate-ID preliminary test doesn't see them as clashing entries.
+
+preliminary_test is left off in the fixture: the remaining preliminary checks
+(adsorption/grain-equivalent/production-destruction) validate gas-grain chemistry
+that a dust-only network intentionally lacks; the coag-relevant tiling validator
+passes with it on. Next: monodisperse IC + K0 tuned to the knee for the analytic
+M0-decay gate (b1), and wiring the dropped-flux diagnostic into output.
+---
+ src/dust/dustevolution.f90                    |  4 ++
+ src/gasgrain.f90                              | 30 ++++++++--
+ src/global_variables.f90                      |  1 +
+ src/input_output.f90                          | 23 +++++---
+ src/main.f90                                  | 48 +++++++++-------
+ src/ode_solver.f90                            |  6 +-
+ tests/fixture_dust_coag/abundances.in         |  3 +
+ .../fixture_dust_coag/activation_energies.in  |  0
+ tests/fixture_dust_coag/element.in            |  3 +
+ tests/fixture_dust_coag/gas_reactions.in      |  0
+ tests/fixture_dust_coag/gas_species.in        | 38 +++++++++++++
+ tests/fixture_dust_coag/grain_reactions.in    |  0
+ tests/fixture_dust_coag/grain_species.in      |  0
+ tests/fixture_dust_coag/parameters.in         | 56 +++++++++++++++++++
+ tests/fixture_dust_coag/surface_parameters.in |  0
+ 15 files changed, 178 insertions(+), 34 deletions(-)
+ create mode 100644 tests/fixture_dust_coag/abundances.in
+ create mode 100644 tests/fixture_dust_coag/activation_energies.in
+ create mode 100644 tests/fixture_dust_coag/element.in
+ create mode 100644 tests/fixture_dust_coag/gas_reactions.in
+ create mode 100644 tests/fixture_dust_coag/gas_species.in
+ create mode 100644 tests/fixture_dust_coag/grain_reactions.in
+ create mode 100644 tests/fixture_dust_coag/grain_species.in
+ create mode 100644 tests/fixture_dust_coag/parameters.in
+ create mode 100644 tests/fixture_dust_coag/surface_parameters.in
+
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index 17cbec4..977c44e 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -184,6 +184,10 @@ subroutine dust_coagulation_inject_static()
+       REACTION_COMPOUNDS_NAMES(5, slot) = YGRAIN(k2)    ! product 2 (upper bin)
+ 
+       REACTION_TYPE(slot) = COAGULATION_TYPE
++      ! Unique reaction ID (high base, clear of chemistry file IDs) so the
++      ! duplicate-ID preliminary test does not treat distinct coagulation pairs
++      ! as clashing entries of one reaction.
++      REACTION_ID(slot) = COAG_REACTION_ID_BASE + ns
+ 
+       ! Podolak/Brauer split on the product weights; loss stays unweighted.
+       REACTION_PRODUCT_WEIGHTS(:, slot) = 1.d0
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index fcd6323..99277bd 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -475,6 +475,19 @@ do I=0,MAX_NUMBER_REACTION_TYPE-1
+   enddo
+ enddo
+ 
++! In a chemistry-free (coagulation-only) network every gas/grain reaction type is
++! absent, and the scan leaves it (start,stop)=(0,0). The many rate loops of the
++! form `do J=type_id_start(T),type_id_stop(T)` would then run once at J=0 and index
++! the reaction arrays out of bounds. Turn each absent range into the empty do-loop
++! range [1,0] so those loops iterate zero times. Guarded by `coagulation`, so the
++! default build is byte-identical; the tiling validator below keys on stop==0 and
++! treats [1,0] and [0,0] identically as "type not defined".
++if (coagulation) then
++  do I=0,MAX_NUMBER_REACTION_TYPE-1
++    if (type_id_stop(I).eq.0) type_id_start(I)=1
++  enddo
++endif
++
+ ! Find the index of CO, H2, H, He and grain0 PLUS H2O and a few other contained in folder cross-sections.
+ do i=1,nb_species
+   if (species_name(i).eq.YH2)   INDH2=i
+@@ -766,7 +779,11 @@ end subroutine index_datas
+     ! For each reaction, we search if there is an activation energy defined for it.
+     ! the "all()" function can compare array element by element to ensure that everything is equal one by one. usefull to find 
+     ! if we have the good reaction
+-    do I=1,nb_reactions
++    ! init_reaction_rates computes chemistry rate coefficients only; the
++    ! coagulation block (appended at the end) gets its kernel from
++    ! dust_coagulation_set_rates. Bound every reaction sweep to
++    ! nb_chemistry_reactions -- identical to nb_reactions when coagulation is off.
++    do I=1,nb_chemistry_reactions
+       ACTIVATION_ENERGY(I)=0.d0
+       
+       do J=1,NEA
+@@ -815,7 +832,7 @@ end subroutine index_datas
+     enddo
+ ! pause
+     ! === Cycle all reactions
+-    do J=1,nb_reactions
++    do J=1,nb_chemistry_reactions
+ 
+       ! ------ Initialise all branching_ratio rate factors, and get species 1 & 2
+       branching_ratio(J)=1.0d0
+@@ -831,7 +848,7 @@ end subroutine index_datas
+         NPATH=0
+ 
+         ! ------ Check for branching
+-        do K=1,nb_reactions
++        do K=1,nb_chemistry_reactions
+            if(REACTION_TYPE(K).EQ.REACTION_TYPE(J)) then
+              if (((REACTION_COMPOUNDS_NAMES(1,J).EQ.REACTION_COMPOUNDS_NAMES(1,K)).AND.&
+                   (REACTION_COMPOUNDS_NAMES(2,J).EQ.REACTION_COMPOUNDS_NAMES(2,K))).OR.&
+@@ -1099,7 +1116,7 @@ end subroutine index_datas
+ 
+       ! ------ Calculate evaporation fraction
+       NEVAP=0
+-      do K=1,nb_reactions
++      do K=1,nb_chemistry_reactions
+         if ((REACTION_COMPOUNDS_NAMES(4,J)(:1).EQ.'J').AND.(RATE_A(K).NE.0.d0)) then
+           if ((REACTION_COMPOUNDS_NAMES(1,J).EQ.REACTION_COMPOUNDS_NAMES(1,K)).AND.&
+           (REACTION_COMPOUNDS_NAMES(2,J).EQ.REACTION_COMPOUNDS_NAMES(2,K)).AND.&
+@@ -1745,8 +1762,9 @@ if (IS_TEST.eq.1) then
+   
+   ! Check reactions id indexes (if they overlap, or miss some indexes)
+   do i=0,MAX_NUMBER_REACTION_TYPE-1
+-    if ((type_id_start(i).eq.0).and.(type_id_stop(i).eq.0)) then
+-      cycle ! Reaction type not defined
++    if (type_id_stop(i).eq.0) then
++      cycle ! Reaction type not defined (start,stop)=(0,0) or, in a coagulation-only
++            ! network, the empty do-loop range (1,0); both mean "no reaction of this type".
+     endif
+     
+     if ((type_id_start(i).gt.type_id_stop(i))) then
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 08c6d32..7f88e0d 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -46,6 +46,7 @@ integer                  :: nb_coagulation_reactions = 0    !< appended coagulat
+ integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
+ integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
+ integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
++integer, parameter       :: COAG_REACTION_ID_BASE = 900000  !< high base for coagulation REACTION_IDs (clear of chemistry file IDs)
+ integer                  :: stdo, ffli
+ ! real(double_precision), dimension(1:):: grain_radii
+ ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 4208025..82e4f7a 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -680,7 +680,11 @@ endif
+ 
+ nb_columns_grain = get_nb_columns(filename_grain)
+ 
+-if ((nb_columns_grain - 2).ne.NB_PRIME_ELEMENTS) then
++! An ice-free / dust-only network (e.g. the Rung 1 coagulation fixture) has no
++! surface species at all, so grain_species.in is legitimately empty and carries
++! no column count. Only cross-check the prime-element width when it has content;
++! this leaves every non-empty (stock) network byte-identical.
++if ((nb_species_for_grain > 0) .and. ((nb_columns_grain - 2).ne.NB_PRIME_ELEMENTS)) then
+   write (Error_unit,'(a,i0,a,a,a,i0,a)') 'The number of prime elements is different in "element.in" (', NB_PRIME_ELEMENTS, &
+   ') and "', trim(filename_grain), '" (', nb_columns_grain-2, ') .'
+   call exit(6)
+@@ -742,6 +746,7 @@ character(len=80) :: line
+ character(len=1), parameter :: comment_character = '!' !< character that will indicate that the rest of the line is a comment
+ integer :: comment_position !< the index of the comment character on the line. if zero, there is none on the current string
+ integer :: error !< to store the state of a read instruction
++integer :: coag_flag_tmp !< 0/1 switch buffer for the coagulation flag
+ 
+ logical :: isParameter, isDefined
+ character(len=80) :: identificator, value
+@@ -869,8 +874,9 @@ if (isDefined) then
+         read(value, '(e12.6)') dust_power_law_index
+       case('dust_grid_source')
+         read(value, *) dust_grid_source
+-      case('coagulation')                         ! Rung 1 master switch (default off)
+-        read(value, '(l1)') coagulation
++      case('coagulation')                         ! Rung 1 master switch (0/1, like the other switches)
++        read(value, '(i2)') coag_flag_tmp
++        coagulation = (coag_flag_tmp /= 0)
+       case('coagulation_kernel')                  ! 'constant' (Rung 1) | 'brownian' (Rung 1b)
+         read(value, *) coagulation_kernel
+       case('constant_kernel_k0')                  ! [cm^3/s] constant kernel for the analytic gate
+@@ -1441,10 +1447,13 @@ enddo
+ !  write(*,*)"--------------------------------------------------------------------------------------"
+ !    pause
+ 
+-! Reorder reaction file entries with ITYPE
++! Reorder reaction file entries with ITYPE. Only the chemistry reactions live in
++! the unordered (UO) arrays; the coagulation block is appended pre-sorted after
++! read_reactions, so bound this to nb_chemistry_reactions (== nb_reactions when
++! coagulation is off, leaving the stock reorder byte-identical).
+ jk=1
+ do i=0,MAX_NUMBER_REACTION_TYPE
+-  do j=1,nb_reactions
++  do j=1,nb_chemistry_reactions
+     if (itypeuo(j).eq.i) then
+       REACTION_COMPOUNDS_NAMES(:,jk)=SYMBOLUO(:,j)     
+       RATE_A(jk)=AUO(j)
+@@ -1489,9 +1498,9 @@ do i=1,nb_reactions
+ !  endif
+ enddo  
+ !  pause
+-if (jk.ne.nb_reactions+1) then
++if (jk.ne.nb_chemistry_reactions+1) then
+   write(Error_unit,*) 'Some reaction was not found by the reorder process'
+-  write(Error_unit,*) jk,'=/',nb_reactions+1 
++  write(Error_unit,*) jk,'=/',nb_chemistry_reactions+1 
+   call exit(4)
+ endif
+ 
+diff --git a/src/main.f90 b/src/main.f90
+index bb27de8..5a03b47 100644
+--- a/src/main.f90
++++ b/src/main.f90
+@@ -148,26 +148,34 @@ PROGRAM nmgc
+         ENDIF
+       ENDDO
+ 
+-      ! Column densities of the self-shielded species, from Av
+-      NH    = actual_av/AV_NH_ratio * abundances(indH)
+-      NH2   = actual_av/AV_NH_ratio * abundances(indH2)
+-      NN2   = actual_av/AV_NH_ratio * abundances(indN2)
+-      NCO   = actual_av/AV_NH_ratio * abundances(indCO)
+-      NH2O  = actual_av/AV_NH_ratio * abundances(indH2O)
+-      NCH   = actual_av/AV_NH_ratio * abundances(indCH)
+-      NCH3  = actual_av/AV_NH_ratio * abundances(indCH3)
+-      NH2CO = actual_av/AV_NH_ratio * abundances(indH2CO)
+-      NCO2  = actual_av/AV_NH_ratio * abundances(indCO2)
+-      NN2O  = actual_av/AV_NH_ratio * abundances(indN2O)
+-      NCH4  = actual_av/AV_NH_ratio * abundances(indCH4)
+-      NOH   = actual_av/AV_NH_ratio * abundances(indOH)
+-      NHCO  = actual_av/AV_NH_ratio * abundances(indHCO)
+-      NCN   = actual_av/AV_NH_ratio * abundances(indCN)
+-      NHCN  = actual_av/AV_NH_ratio * abundances(indHCN)
+-      NHNC  = actual_av/AV_NH_ratio * abundances(indHNC)
+-      NNH   = actual_av/AV_NH_ratio * abundances(indNH)
+-      NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
+-      NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
++      ! Column densities of the self-shielded species, from Av. Each is only used
++      ! by the corresponding H2/CO/N2 self-shielding rate code, which is absent when
++      ! those reactions are not in the network (e.g. the dust-only coagulation
++      ! fixture). Guard on a resolved index so a species missing from a reduced
++      ! network does not index abundances(0); byte-identical for any full network,
++      ! where every index is positive.
++      NH=0.d0; NH2=0.d0; NN2=0.d0; NCO=0.d0; NH2O=0.d0; NCH=0.d0; NCH3=0.d0
++      NH2CO=0.d0; NCO2=0.d0; NN2O=0.d0; NCH4=0.d0; NOH=0.d0; NHCO=0.d0; NCN=0.d0
++      NHCN=0.d0; NHNC=0.d0; NNH=0.d0; NNH2=0.d0; NNH3=0.d0
++      if (indH   >0) NH    = actual_av/AV_NH_ratio * abundances(indH)
++      if (indH2  >0) NH2   = actual_av/AV_NH_ratio * abundances(indH2)
++      if (indN2  >0) NN2   = actual_av/AV_NH_ratio * abundances(indN2)
++      if (indCO  >0) NCO   = actual_av/AV_NH_ratio * abundances(indCO)
++      if (indH2O >0) NH2O  = actual_av/AV_NH_ratio * abundances(indH2O)
++      if (indCH  >0) NCH   = actual_av/AV_NH_ratio * abundances(indCH)
++      if (indCH3 >0) NCH3  = actual_av/AV_NH_ratio * abundances(indCH3)
++      if (indH2CO>0) NH2CO = actual_av/AV_NH_ratio * abundances(indH2CO)
++      if (indCO2 >0) NCO2  = actual_av/AV_NH_ratio * abundances(indCO2)
++      if (indN2O >0) NN2O  = actual_av/AV_NH_ratio * abundances(indN2O)
++      if (indCH4 >0) NCH4  = actual_av/AV_NH_ratio * abundances(indCH4)
++      if (indOH  >0) NOH   = actual_av/AV_NH_ratio * abundances(indOH)
++      if (indHCO >0) NHCO  = actual_av/AV_NH_ratio * abundances(indHCO)
++      if (indCN  >0) NCN   = actual_av/AV_NH_ratio * abundances(indCN)
++      if (indHCN >0) NHCN  = actual_av/AV_NH_ratio * abundances(indHCN)
++      if (indHNC >0) NHNC  = actual_av/AV_NH_ratio * abundances(indHNC)
++      if (indNH  >0) NNH   = actual_av/AV_NH_ratio * abundances(indNH)
++      if (indNH2 >0) NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
++      if (indNH3 >0) NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
+ 
+       call integrate_chemical_scheme(delta_t=output_timestep, temp_abundances=abundances(1:nb_species), & ! Inputs
+       i_tol=itol, a_tol=atol, i_task=itask, i_opt=iopt, m_f=mf, & ! Inputs
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index 46dd992..bec7bc4 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -1344,7 +1344,11 @@ abCO(1:nb_grains) = 0.d0
+ !   do J=1,nb_species
+ !       ACC_RATES_PREFACTOR(J)=COND*STICK_SPEC(J)/SQRT(SPECIES_MASS(J))
+ !   ENDDO
+-  do j=1,nb_reactions
++  ! Accretion prefactors are a gas-phase-accretion quantity; coagulation reactions
++  ! never use them (their kernel is on reaction_rates), and their reactant_1_idx is
++  ! deliberately unset, so restrict this to the chemistry block (== nb_reactions when
++  ! coagulation is off).
++  do j=1,nb_chemistry_reactions
+     ACC_RATES_PREFACTOR(J) = COND(j)*STICK_SPEC(reactant_1_idx(J))/SQRT(SPECIES_MASS(reactant_1_idx(J)))
+ !   write(298,*)J,ACC_RATES_PREFACTOR(J),STICK_SPEC(reactant_1_idx(J)),reactant_1_idx(J),species_name(reactant_1_idx(J))
+   enddo  
+diff --git a/tests/fixture_dust_coag/abundances.in b/tests/fixture_dust_coag/abundances.in
+new file mode 100644
+index 0000000..e59ba98
+--- /dev/null
++++ b/tests/fixture_dust_coag/abundances.in
+@@ -0,0 +1,3 @@
++! Abundances relative to H
++He          = 9.000000D-02
++H2          = 5.000000D-01
+diff --git a/tests/fixture_dust_coag/activation_energies.in b/tests/fixture_dust_coag/activation_energies.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_dust_coag/element.in b/tests/fixture_dust_coag/element.in
+new file mode 100644
+index 0000000..5504440
+--- /dev/null
++++ b/tests/fixture_dust_coag/element.in
+@@ -0,0 +1,3 @@
++! Species name ; mass (AMU)
++H            1.000
++He           4.000
+diff --git a/tests/fixture_dust_coag/gas_reactions.in b/tests/fixture_dust_coag/gas_reactions.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_dust_coag/gas_species.in b/tests/fixture_dust_coag/gas_species.in
+new file mode 100644
+index 0000000..eeaa2ba
+--- /dev/null
++++ b/tests/fixture_dust_coag/gas_species.in
+@@ -0,0 +1,38 @@
++H            0  1  0
++H2           0  2  0
++He           0  0  1
++e-          -1  0  0
++GRAIN0       0  0  0
++GRAIN-      -1  0  0
++GRAIN01      0  0  0
++GRAIN02      0  0  0
++GRAIN03      0  0  0
++GRAIN04      0  0  0
++GRAIN05      0  0  0
++GRAIN06      0  0  0
++GRAIN07      0  0  0
++GRAIN08      0  0  0
++GRAIN09      0  0  0
++GRAIN10      0  0  0
++GRAIN11      0  0  0
++GRAIN12      0  0  0
++GRAIN13      0  0  0
++GRAIN14      0  0  0
++GRAIN15      0  0  0
++GRAIN16      0  0  0
++GRAIN01-    -1  0  0
++GRAIN02-    -1  0  0
++GRAIN03-    -1  0  0
++GRAIN04-    -1  0  0
++GRAIN05-    -1  0  0
++GRAIN06-    -1  0  0
++GRAIN07-    -1  0  0
++GRAIN08-    -1  0  0
++GRAIN09-    -1  0  0
++GRAIN10-    -1  0  0
++GRAIN11-    -1  0  0
++GRAIN12-    -1  0  0
++GRAIN13-    -1  0  0
++GRAIN14-    -1  0  0
++GRAIN15-    -1  0  0
++GRAIN16-    -1  0  0
+diff --git a/tests/fixture_dust_coag/grain_reactions.in b/tests/fixture_dust_coag/grain_reactions.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_dust_coag/grain_species.in b/tests/fixture_dust_coag/grain_species.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/fixture_dust_coag/parameters.in b/tests/fixture_dust_coag/parameters.in
+new file mode 100644
+index 0000000..c350053
+--- /dev/null
++++ b/tests/fixture_dust_coag/parameters.in
+@@ -0,0 +1,56 @@
++!# Rung 1 dust-only coagulation fixture (ice-free, chemistry-off). Fast vehicle
++!# for validating the coagulation-ON path and the analytic gates in this sandbox.
++is_3_phase = 0
++preliminary_test = 0
++grain_temperature_type = fixed_to_dust_size
++is_grain_reactions = 0
++dust_grid_source = derived
++dust_ic = MRN
++a_min =  1.000E-06
++a_max =  3.2003E-05
++mass_ratio =  2.000E+00
++dust_power_law_index = -3.500E+00
++grain_density =  3.000E+00
++coagulation = 1
++coagulation_kernel = constant
++constant_kernel_k0 =  1.000E-09
++is_h2_formation_rate = 0
++is_absorption_h2 = 0
++is_absorption_co = 0
++is_absorption_n2 = 0
++is_photodesorb = 0
++is_crid = 0
++is_er_cir = 0
++grain_tunneling_diffusion = 0
++modify_rate_flag = 0
++sparsity = numerical
++sparsity_check_steps = 0
++conservation_type = 0
++nb_active_lay =  2.000E+00
++initial_gas_density =  2.212E+08
++initial_gas_temperature =  2.741E+01
++initial_visual_extinction =  1.582E+01
++cr_ionisation_rate =  1.300E-17
++x_ionisation_rate =  0.000E+00
++uv_flux =  1.554E+03
++initial_dtg_mass_ratio =  1.000E-02
++sticking_coeff_neutral =  1.000E+00
++sticking_coeff_positive =  0.000E+00
++sticking_coeff_negative =  0.000E+00
++grain_radius =  1.000E-05
++diffusion_barrier_thickness =  1.000E-08
++surface_site_density =  8.000E+14
++diff_binding_ratio_surf =  4.000E-01
++diff_binding_ratio_mant =  8.000E-01
++chemical_barrier_thickness =  1.000E-08
++cr_peak_grain_temp =  7.000E+01
++cr_peak_duration =  1.000E-05
++Fe_ionisation_rate =  3.000E-14
++vib_to_dissip_freq_ratio =  1.000E-02
++ED_H2 =  2.300E+01
++start_time =  1.000E+00
++stop_time =  1.000E+02
++nb_outputs = 5
++output_type = log
++relative_tolerance =  1.000E-04
++minimum_initial_abundance =  1.000E-40
+diff --git a/tests/fixture_dust_coag/surface_parameters.in b/tests/fixture_dust_coag/surface_parameters.in
+new file mode 100644
+index 0000000..e69de29
+-- 
+2.43.0
+
