@@ -139,3 +139,176 @@ derivative form (`ν·F/Y_tot`, floor where a `max(Y_tot,floor)` divisor appears
 one confounder scope-guard (hard-assert under coag), `ab_lay` frozen + one
 cap-binding diagnostic, and `grain_abundance_floor` promoted to a shared knob.
 Gate 5a state set extended to include an ice-rich state.
+
+---
+
+## 4. Rung 5 implementation outcome (this commit)
+
+**Status:** chemistry Jacobian **COMPLETE and FD-verified**. Type-50 ice-transport
+Jacobian **VERIFIED entry-exact** by an exhaustive per-reaction-analytic sweep
+(§4.3) — **Rung 5b is retracted; there is no gap to complete.** The residual
+full-network `021≢022` on type-50 rows is a **finite-difference oracle artifact**
+(§4.4), not a Jacobian defect. Production `mf` stays **121** pending the Rung 5c
+convergence test (021-vs-121 in a bin-depleting regime); the retarget decision is
+deferred to that evidence, not to any missing analytic work. **[UPDATED by §4.5:
+Rung 5c is complete; the coagulation production path is retargeted to 021 on
+symbolic sparsity.]**
+
+### 4.1 Design refinement — recorded-δ (supersedes the static `ν·F/Y_tot` metadata)
+
+The §0 form `∂F/∂Y(GRAIN_k) = ν·F/Y_tot` is correct for the clean sites (accretion
+`ν=+1`, LH `ν=−1`, cap-active photodesorption `ν=+1`), but the **H/H₂ accretion
+sticking coefficient is not a clean `ν=±1` site**: its rate is
+`P · Y_tot · stick(SUMLAY(Y_tot))`, and `SUMLAY ∝ 1/Y_tot` (live, Rung 3), so
+
+```
+∂rate/∂Y_tot = rate·(1/Y_tot + slog·∂SUMLAY/∂Y_tot),  slog = ∂ln(stick)/∂SUMLAY
+```
+
+which carries a state-dependent correction on top of `ν=+1`. Rather than special-case
+it, the implementation records, per in-scope reaction at its rate site (where SUMLAY,
+`stick`, the floor, and the cap state are all in scope), the exact
+`δ = ∂reaction_rates/∂Y_tot` into `gtodn_jac_dcoef(:)` each RHS evaluation;
+`get_jacobian` then deposits `δ × (bilinear part)` into both grain charge columns,
+`+w_p` to products and `−δ·bilinear` to reactants. This **subsumes** the ν-sign, the
+`max(Y_tot,floor)` floor, the `SUMLAY≥MLAY` cap gate, and the sticking correction in
+one place — no per-entry hybrid, no re-derivation of SUMLAY in `get_jacobian`. The
+static `gtodn_jac_nu` / `gtodn_jac_floored` metadata is removed.
+
+- `∂SUMLAY(k)/∂Y_tot = −SUMLAY/Y_tot` above the floor **and only where SUMLAY is live**
+  (`coagulation` on); frozen SUMLAY (coag off / override) has zero derivative — this
+  keeps the override path self-consistent.
+- H/H₂ sticking: `slog = (stick_ice−stick_bare)/stick` for `SUMLAY≤1`, else 0
+  (flat above 1 ML) — returned by a new out-arg of `sticking_special_cases`.
+- LH mantle-multilayer branch (`HAS_MANTLE_COMPOUND .and. sumlaymant>1`): the two
+  Y_tot dependences cancel, `δ=0` — coded per the §1 recommendation (v1-inert insurance).
+
+### 4.2 Verification (tests/gtodn_jac_fd_check.*)
+
+Analytic `get_jacobian` vs central-difference FD of `get_temporal_derivatives`, per
+grain column, coagulation on. States: A zero ice (accretion), B trace ice on a real
+LH reaction (reciprocal), C mild ice cap-off (**H/H₂ sticking active**), D heavy ice
+(**photodesorption cap active**). Worst grain-column relative error:
+
+| state | full run (kernel 1e-14) | chemistry-isolated (kernel→0) |
+|-------|-------------------------|-------------------------------|
+| A accretion         | 3.4e-10 ✔ | 3.4e-10 ✔ |
+| B LH reciprocal     | 0.35 ✗ (type-50 only) | 3.4e-10 ✔ |
+| C sticking, cap off | 1.03 ✗ (type-50 only) | 1.6e-8 ✔ |
+| D cap on            | 3.7e-7 ✔ | 3.7e-7 ✔ |
+
+Isolating the coagulation kernel (so type-50 ice-transport fluxes and their Jacobian
+vanish while dynamic GTODN stays live) makes **all four states pass < 1e-5** — this
+is the proof that the chemistry-coupling entries close gate 5a and that the full-run
+failures are external to Rung 5.
+
+### 4.3 Type-50 ice-transport Jacobian — VERIFIED entry-exact (Rung 5b retracted)
+
+The working hypothesis for §4.3 was a gain-side non-reactant gap analogous to the
+Rung-4 live divisor. A read-only diagnosis (tests/ice_transport_jac_diag.*) and an
+exhaustive sweep (tests/ice_transport_jac_sweep.*) **refuted it**. `get_jacobian`
+already produces the type-50 grain-column gain entries, because ice transport carries
+the collision partner `GRAIN_j` as an **explicit reactant** — so the reactant
+differentiator visits the reaction and deposits `∂flux/∂Y(GRAIN_j)` to every product
+bin, including the redistributed non-reactant bins. (This is exactly what the live
+divisor lacked: there the grain entered only through a rate *coefficient*, with no
+compound to trigger the column.)
+
+**Exhaustive proof (no finite differencing, so no cancellation).** For every column
+and every row, `get_jacobian` isolated to type-50 was compared against an independent
+hand-summed per-reaction analytic derivative of the RHS flux, in a light (ice 1e-10)
+and heavy (ice 1e-8) state: **393 nonzero entries per state, 786 comparisons, 0
+mismatches, agreement at machine epsilon** (max |Δ| 2.0e-28, max rel 2.3e-16). Because
+the hand sum loops every type-50 reaction independently, the exact match proves the
+loop drops no reaction, selects the correct partner reactant in each `∂flux/∂Y`, and
+applies every Podolak/Brauer weight and sign correctly. Ten independent subset-FD
+anchors (ice transport and grain-grain, bins 2/3/4, both charge columns) confirm the
+analytic model itself against a background-free finite difference.
+
+**Conclusion:** the type-50 (ice-transport + grain-grain) Jacobian is entry-exact.
+There is no gap, no sign error, no weight error. **Rung 5b is not needed and is
+retracted.**
+
+### 4.4 Validation lesson — the FD noise floor and the two-legged gate
+
+The full-network `021≢022` failures were finite-difference **cancellation artifacts**,
+not defects. A coagulation coupling `∂(dY_i/dt)/∂Y(GRAIN_k)` can be a tiny fraction of
+`dY_i/dt` when the species' derivative is dominated by other (grain-independent) terms:
+J03CH2OH's ice-transport coupling to GRAIN01 is `~6e-6` of its chemistry-dominated
+background (`dY/dt ≈ -9.5e-12`), GRAIN02's coupling `~2e-5` of its coagulation
+background (`≈ -3.8e-8`). Central- or forward-differencing the RHS then subtracts two
+nearly equal large numbers, and the signal is lost below `~ε·(background/signal)`. This
+hits **any** FD Jacobian — the 022 oracle and the internal Jacobian under 121 alike.
+
+**General rule (adopted): FD verification has a noise floor at roughly `1e-5` of the
+background derivative.** Entries below that floor cannot be validated by differencing
+the RHS. The equivalence gate is therefore **two-legged**:
+- **above the floor** — FD (022 oracle / gtodn_jac_fd_check) remains the check; this
+  covers the Rung-5 chemistry grain-column entries, which are the dominant coupling of
+  the species they touch (verified `<1e-5`, §4.2).
+- **below the floor** — the **per-reaction-analytic sweep** (ice_transport_jac_sweep)
+  is the check: it compares `get_jacobian` against the closed-form derivative of the
+  RHS flux and never differences the RHS, so it has no cancellation floor. This is the
+  standing gate for the type-50 Jacobian.
+
+The lesson generalizes beyond coagulation: whenever an analytic Jacobian entry is
+expected to be much smaller than the row's dominant terms, prefer the analytic
+cross-check over FD.
+
+
+### 4.5 Rung 5c — solver-method retarget to 021 (coagulation path)
+
+**Decision: production coagulation runs on 021 (MOSS=0, symbolic structure +
+analytic get_jacobian) when `sparsity = symbolic` (the default); coag-on with
+`sparsity = numerical` stays on 121; coag-off stays on 121.**
+
+**Correction to the record (load-bearing).** In this DLSODES, `MF` decodes as
+`MOSS = MF/100`, then `METH`, `MITER`. So **121 = MOSS=1, MITER=1** — it uses the
+*analytic* `get_jacobian` for values (structure auto-probed), **not** finite
+differences. FD is 022 (MITER=2). The earlier characterization of 121 as
+"sparsity-only, values internally differenced" was wrong. Consequences:
+- The analytic-Jacobian payoff (vs FD) was **always in production** under 121.
+  Measured in a bin-depleting regime, 022 (FD) costs ~60x the RHS evaluations and
+  ~50x the wall time of 121/021, with a convergence failure; 121 and 021 are the
+  fast analytic path.
+- Rung 5 was therefore an **analytic-completeness** milestone (the grain-column
+  chemistry Jacobian is now entry-exact and gate-verifiable), **not** a
+  convergence speedup: pre- vs post-Rung-5 production 121 in the strong regime is
+  NST 9923 -> 10021, unchanged within noise, because the completed entries are
+  sub-dominant (the same reason FD cannot resolve them, sec 4.4).
+
+**Measured convergence (tests/rung5c_convergence.sh), all `sparsity=symbolic`:**
+
+| regime | mf | Jacobian | NST | NFE | NJE | fails | wall |
+|--------|----|----------|-----|-----|-----|-------|------|
+| K0=1e-10, 10 Myr | 121 | analytic, auto-probe | 10021 | 13120 | 339 | 0 | 0.60s |
+| K0=1e-10, 10 Myr | 021 | analytic, symbolic  | 9973  | 13161 | 341 | 0 | 0.61s |
+| K0=1e-10, 10 Myr | 022 | **FD**, symbolic    | 32474 | 802127| 13022| 1 | 30.3s |
+| K0=1e-11, 0.1 Myr| 121 | analytic, auto-probe | 6489  | 9014  | 247 | 0 | 0.41s |
+| K0=1e-11, 0.1 Myr| 021 | analytic, symbolic  | 6505  | 9002  | 254 | 0 | 0.42s |
+
+021 and 121 **tie** and give **bit-identical** results (max rel diff 0.000). So
+the retarget is not chosen on speed.
+
+**Why retarget anyway — the MOSS=1 single-state-probe hazard.** 121 infers the
+sparsity structure by probing `get_jacobian`; the driver cold-starts each output
+interval (`i_state=1`), so the probe is taken at each interval's *starting* state.
+A coupling that is exactly zero at that state but nonzero later is dropped from the
+structure, and Newton then runs without it. This project has three couplings that
+are zero at plausible probe states: the live divisor before any ice forms and at a
+floored bin, photodesorption at `SUMLAY~0`, and the LH reciprocal at `t=0`. The
+first interval is ice-free, and any within-interval turn-on is missed for that
+interval. The symbolic superset (021) carries every structural entry by
+construction, closing the hazard. The `sparsity=symbolic` requirement is the
+guarantee, not a burden; it is already the production default.
+
+**Gates cleared before finalizing (both required):**
+- (a) 021-on-symbolic completes a full fiducial science run (reduced_CHO, coag on,
+  2 Myr) and is **bit-identical to 121** (max rel diff 0.000). Both mf hit 10
+  recoverable `istate=-4` error-test-failure restarts on this config — identical
+  across mf, so a pre-existing property of the run, not a retarget effect (flagged
+  for awareness; worth a separate look at tolerances/first-interval span).
+- (b) `equivalence.sh` **PASS** post-retarget (1414 species, 56560 values, worst
+  rel diff 0.000): the coag-off / numerical path still reproduces nmgc-2.0 exactly,
+  confirming the retarget does not disturb it. Chemistry FD gate and type-50 sweep
+  gate both still green.
