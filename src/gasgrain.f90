@@ -336,17 +336,24 @@ if (oracle.ne.0) then
   return
 endif
 
-if (coagulation) then
-  ! Rung 5: the dynamic-GTODN CHEMISTRY Jacobian (accretion/LH/photodesorption/H2
-  ! sticking) is analytic-complete and FD-verified. The type-50 ice-transport +
-  ! grain-grain Jacobian is ALSO verified entry-exact (per-reaction-analytic sweep,
-  ! tests/ice_transport_jac_sweep) -- Rung 5b retracted, no gap. The residual
-  ! full-network 021!=022 on type-50 rows is an FD-oracle cancellation artifact
-  ! below the ~1e-5 FD noise floor, not a defect (see docs/PhaseII_rung5_*).
-  ! Production stays on 121 pending the Rung 5c convergence test (021 vs 121 in a
-  ! bin-depleting regime); retarget to 021 is decided on that evidence.
+if (coagulation .and. sparsity.eq.'symbolic') then
+  ! Rung 5c: retarget the coagulation production path to 021 (MOSS=0: symbolic
+  ! structure + analytic get_jacobian, MITER=1). 021 ties 121 on measured
+  ! convergence and gives bit-identical results (both are MITER=1 analytic; FD is
+  ! 022, ~50x slower), but it eliminates the MOSS=1 single-state-probe hazard:
+  ! 121 infers the sparsity by probing get_jacobian at each interval's starting
+  ! state, so a coupling that is zero at the probe state but nonzero later can be
+  ! silently dropped -- and this project has three such couplings (live divisor
+  ! pre-ice, photodesorption at SUMLAY~0, LH reciprocal at t=0). The symbolic
+  ! superset carries them all by construction; the symbolic requirement IS the
+  ! guarantee, not a burden. See docs/PhaseII_rung5_site_classification.md sec 4.5.
+  solver_method_flag = 21
+else if (coagulation) then
+  ! coag-on but sparsity=numerical: 021 would FATAL (the numerical pattern omits
+  ! the live-divisor block), so keep the MOSS=1 auto-probe path here.
   solver_method_flag = 121
 else
+  ! coag-off: unchanged -- preserves the bit-for-bit nmgc-2.0 equivalence (121).
   solver_method_flag = 121
 endif
 
