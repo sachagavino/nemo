@@ -338,11 +338,13 @@ endif
 
 if (coagulation) then
   ! Rung 5: the dynamic-GTODN CHEMISTRY Jacobian (accretion/LH/photodesorption/H2
-  ! sticking) is analytic-complete and FD-verified (see docs/PhaseII_rung5_*).
-  ! Retarget to 021 is BLOCKED on Rung 5b: the type-50 ice-transport gain-side
-  ! Jacobian is still incomplete, so full-network 021 != 022 with coagulation on.
-  ! Stay on 121 (get_jacobian gives the sparsity; values are internally differenced)
-  ! until 5b lands, which keeps the coag entries exact meanwhile.
+  ! sticking) is analytic-complete and FD-verified. The type-50 ice-transport +
+  ! grain-grain Jacobian is ALSO verified entry-exact (per-reaction-analytic sweep,
+  ! tests/ice_transport_jac_sweep) -- Rung 5b retracted, no gap. The residual
+  ! full-network 021!=022 on type-50 rows is an FD-oracle cancellation artifact
+  ! below the ~1e-5 FD noise floor, not a defect (see docs/PhaseII_rung5_*).
+  ! Production stays on 121 pending the Rung 5c convergence test (021 vs 121 in a
+  ! bin-depleting regime); retarget to 021 is decided on that evidence.
   solver_method_flag = 121
 else
   solver_method_flag = 121
