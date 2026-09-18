@@ -60,6 +60,22 @@ if (coagulation .and. is_3_phase.eq.1) then
     &(mantle K-ice transport is not implemented). Set is_3_phase = 0 or coagulation = 0.'
   call exit(33)
 endif
+! Rung 5 v1 scope guard (brief decision 6). The dynamic surface-rate GTODN
+! substitution and its analytic grain-abundance Jacobian entries are derived only
+! for the three in-scope reaction classes (accretion, photodesorption, LH) in the
+! 2-phase config. The modified-rate scheme and the Eley-Rideal/CIR channel make a
+! surface rate's grain-abundance power branch-dependent or cancelling
+! (classification doc rows G-J), so a blanket entry would be silently wrong. Fail
+! loudly rather than mis-compute a Jacobian. is_3_phase is enforced just above
+! (classification doc rows K-L). modified-LH / ER / 3-phase Jacobians are v2.
+if (coagulation .and. (MODIFY_RATE_FLAG.ne.0 .or. is_er_cir.ne.0)) then
+  write(error_unit,'(a)') 'Error: coagulation (dynamic GTODN, Rung 5) is supported &
+    &only with modify_rate_flag = 0 and is_er_cir = 0 in v1. These confounders make a &
+    &surface rate''s grain-abundance dependence branch-dependent or cancelling, and &
+    &their Jacobian entries are not derived. Set modify_rate_flag = 0 and is_er_cir = 0, &
+    &or set coagulation = 0.'
+  call exit(34)
+endif
 ! Coagulation reactions are appended to the network as a terminal block. Count
 ! them now -- after the grid (mass_grid) exists, BEFORE get_array_sizes sizes the
 ! reaction arrays. Off by default => nb_coagulation_reactions stays 0.
@@ -233,6 +249,13 @@ call set_chemical_reactants()
 !! max_reactions_same_species is set here. nb_reactions_using_species and relevant_reactions array are set here.
 call init_relevant_reactions()
 
+! Rung 5: build the dynamic-GTODN Jacobian map (reverse species->bin map + in-scope
+! reaction classification) whenever dynamic GTODN can be active -- coagulation on, or
+! the force-dynamic verification override (gate 5b, coag off). Must precede the first
+! get_jacobian call (count_nonzeros below), which otherwise dereferences the unbuilt
+! map. Pure integer bookkeeping; it never touches rates, so coag-off is unaffected.
+if (coagulation .or. force_dynamic_gtodn_override()) call build_gtodn_jacobian_map()
+
 ! Calculate the optimum number for temporary solving-arrays in ODEPACK, based on the number of non-zeros values in 
 !! the jacobian
 call count_nonzeros()
@@ -314,7 +337,13 @@ if (oracle.ne.0) then
 endif
 
 if (coagulation) then
-  solver_method_flag = 121   ! Rung 5: retarget to 021 (analytic-complete)
+  ! Rung 5: the dynamic-GTODN CHEMISTRY Jacobian (accretion/LH/photodesorption/H2
+  ! sticking) is analytic-complete and FD-verified (see docs/PhaseII_rung5_*).
+  ! Retarget to 021 is BLOCKED on Rung 5b: the type-50 ice-transport gain-side
+  ! Jacobian is still incomplete, so full-network 021 != 022 with coagulation on.
+  ! Stay on 121 (get_jacobian gives the sparsity; values are internally differenced)
+  ! until 5b lands, which keeps the coag entries exact meanwhile.
+  solver_method_flag = 121
 else
   solver_method_flag = 121
 endif

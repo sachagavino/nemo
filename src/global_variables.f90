@@ -60,6 +60,23 @@ real(double_precision)   :: coag_dropped_flux = 0.d0 !< runtime coagulation coll
 real(double_precision)   :: coag_total_flux   = 0.d0 !< runtime total coagulation collision rate (all pairs)
 integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
 integer, parameter       :: COAG_REACTION_ID_BASE = 900000  !< high base for coagulation REACTION_IDs (clear of chemistry file IDs)
+
+! --- Rung 5: dynamic surface-rate GTODN, analytic grain-abundance Jacobian map.
+!! Built once at init by build_gtodn_jacobian_map() when dynamic GTODN is active
+!! (coagulation on, or the NEMO_FORCE_DYNAMIC_GTODN override). These let get_jacobian
+!! add the d(rate)/dY(GRAIN_k) = nu*flux/Y_tot entries for the in-scope reaction
+!! classes, whose GRAIN_k dependence is in the rate coefficient only (GRAIN_k is not
+!! a compound, so the reactant differentiator never produces them). See
+!! docs/PhaseII_rung5_site_classification.md.
+integer, allocatable, dimension(:) :: grain_col_bin   !< dim(nb_species): bin k if the species is GRAIN_k^0 or GRAIN_k^-, else 0
+integer, allocatable, dimension(:) :: gtodn_jac_list  !< flat list of in-scope reaction indices (types 99, 14, 66, 67)
+integer                            :: gtodn_jac_n = 0  !< number of entries in gtodn_jac_list
+!> dim(nb_reactions): d(reaction_rates)/dY_tot(bin) for each in-scope reaction, recomputed
+!! analytically at its rate site every RHS evaluation (0 for out-of-scope or gated-off
+!! reactions). get_jacobian deposits dcoef * (bilinear part) into the grain columns, so all
+!! the state-dependent physics -- nu sign, the max(Y_tot,floor) floor, the photodesorption
+!! monolayer cap, and the H/H2 sticking(SUMLAY) term -- lives where SUMLAY/stick are in scope.
+real(double_precision), allocatable, dimension(:) :: gtodn_jac_dcoef
 integer                  :: stdo, ffli
 ! real(double_precision), dimension(1:):: grain_radii
 ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a
@@ -537,6 +554,58 @@ logical :: freeze_dependent_rates = .false.
 
 
 contains 
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Single predicate gating live (dynamic) vs frozen surface-rate GTODN.
+!! Rung 5: every grain-abundance-dependent surface-rate site queries THIS
+!! function instead of testing `coagulation` inline, so the coag gating and the
+!! verification override live in one place (brief sec.2, sec.4.2). It lives in
+!! global_variables (not next to solver_method_flag in gasgrain) because the rate
+!! sites are in ode_solver, and gasgrain USEs ode_solver -- putting it in gasgrain
+!! would be a circular dependency. global_variables is USEd by every caller.
+!!
+!! Returns .true. when the instantaneous grain abundance must be read at the rate
+!! sites (and, later, the analytic grain-abundance Jacobian entries supplied):
+!!   - production: exactly when coagulation is on. coag off => Y(GRAIN_k) is
+!!     constant => dynamic == frozen, and mf=121 stays bit-identical to nmgc-2.0.
+!!   - verification: forced on regardless of `coagulation` by the
+!!     NEMO_FORCE_DYNAMIC_GTODN override, for the coag-off reduction test
+!!     (gate 5b), analogous to NEMO_ORACLE_MF for the solver method flag.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+logical function dynamic_gtodn_active()
+implicit none
+
+if (force_dynamic_gtodn_override()) then
+  dynamic_gtodn_active = .true.
+  return
+endif
+
+dynamic_gtodn_active = coagulation
+
+return
+end function dynamic_gtodn_active
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Read the NEMO_FORCE_DYNAMIC_GTODN environment variable
+!! (verification/test only). Returns .true. only when set to a non-zero integer,
+!! forcing dynamic GTODN on with coagulation off for the gate-5b coag-off
+!! reduction test. Returns .false. when unset/blank/zero/unparseable -- the
+!! production default -- so it can never perturb a production run. Mirrors
+!! oracle_mf_override in gasgrain.f90.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+logical function force_dynamic_gtodn_override()
+implicit none
+character(len=32) :: v
+integer :: ln, st, val
+
+force_dynamic_gtodn_override = .false.
+call get_environment_variable('NEMO_FORCE_DYNAMIC_GTODN', v, ln, st)
+if (st.ne.0 .or. ln.le.0) return
+read(v, *, iostat=st) val
+if (st.eq.0 .and. val.ne.0) force_dynamic_gtodn_override = .true.
+
+return
+end function force_dynamic_gtodn_override
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @author 
