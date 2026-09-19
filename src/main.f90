@@ -58,7 +58,7 @@ PROGRAM nmgc
   integer :: itask = 1 !< ITASK = 1 for normal computation of output values of Y at t = TOUT.
   integer :: istate = 1 !< ISTATE = integer flag (input and output). Set ISTATE = 1.
   integer :: iopt = 1 !< IOPT = 1 to indicate optional inputs are used.
-  integer :: mf !< DLSODES method flag; set by solver_method_flag() after init (production 121; FD-complete 022 only via NEMO_ORACLE_MF)
+  integer :: mf !< DLSODES method flag; set by solver_method_flag() after init (coag-on+symbolic -> 021 analytic; coag-off or numerical -> 121; both MITER=1. FD-complete 022 only via NEMO_ORACLE_MF)
   real(double_precision) :: atol = 1.d-99 !< absolute tolerance parameter
 
   real(double_precision) :: output_timestep !< Timestep to reach the next output time [s]

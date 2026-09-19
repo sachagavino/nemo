@@ -3,8 +3,9 @@
 !******************************************************************************
 !
 ! DESCRIPTION:
-!> @brief Rung 1: pure grain coagulation, encoded as bilinear pseudo-reactions
-!!        that flow through the existing chemistry RHS/Jacobian machinery.
+!> @brief Grain coagulation AND collisional ice transport, encoded as bilinear
+!!        pseudo-reactions that flow through the existing chemistry RHS/Jacobian
+!!        machinery. Both are charge-resolved over the {0,-} states.
 !!
 !! ENCODING (design-thread-blessed). One pseudo-reaction per UNORDERED bin pair
 !! (i,j), i<=j:
@@ -34,12 +35,14 @@
 !! ~0 over the validation window, so a grid/K0 misconfiguration surfaces loudly
 !! instead of hiding. The skipped pairs are recorded at init for that check.
 !!
-!! ICE GUARD. Coagulation moves only the refractory grain-core pseudo-species.
-!! Ice (J surface / K mantle species) is not transported by coagulation until
-!! Rung 2; running coagulation on an ice-bearing network would orphan the ice
-!! (ice whose host grains have left the bin) -- physically incoherent. We forbid
-!! it outright: coagulation on a network containing any J/K species is a fatal
-!! error. Rung 1 runs on the ice-free fixture and sidesteps this entirely.
+!! ICE TRANSPORT. When grains merge, the ice mantle rides along: each surface
+!! species J_i X is carried to the product bins as a generated pseudo-reaction
+!!   J_i X + GRAIN_j -> w1 J_k1 X + w2 J_k2 X + GRAIN_j
+!! with the SAME (w1,w2)=(eps,1-eps) as the grain redistribution (ice-follows-
+!! particle), so each ice species is conserved by construction. See
+!! dust_coagulation_inject_static part (2). NOTE: the old Rung-1 ice-free guard
+!! (coag_assert_ice_free) is retained below but is currently UNCALLED dead code --
+!! remove or re-wire it; it does not gate anything as of Rung 2+.
 !
 !******************************************************************************
 

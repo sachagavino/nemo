@@ -306,24 +306,29 @@ call flush(stdo)
 end subroutine init_gasgrain
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-!> @brief DLSODES method flag. Production ships 121 (analytic sparse Jacobian,
-!! MOSS=1/MITER=1) for both coag-off and coag-on; the FD-complete path (022) is a
-!! verification oracle reached only via the NEMO_ORACLE_MF environment variable.
+!> @brief DLSODES method flag, selected at runtime from (coagulation, sparsity).
+!! MF decodes as MOSS=MF/100, then METH, MITER. 121 and 021 are BOTH MITER=1
+!! (analytic Jacobian values from get_jacobian); they differ only in MOSS, i.e. in
+!! how the sparsity PATTERN is obtained, not in how the values are computed. The
+!! FD-complete path (022, MITER=2) is a verification oracle reached only via the
+!! NEMO_ORACLE_MF environment variable.
 !!
-!! coag OFF -> 121. Grains frozen, live divisor inactive; also reproduces nmgc-2.0
-!!   bit-for-bit (equivalence.sh), which MOSS=0/MITER=2 would break.
-!! coag ON  -> 121 (Rung 4). The only live grain-abundance coupling is the monolayer
-!!   divisor SUMLAY, which is BOUNDED by construction (floored, see ode_solver.f90
-!!   ~1550), so its Jacobian derivative -> 0 as a bin depletes -- it is never the
-!!   stiff -1/Y^2 reciprocal. The entry get_jacobian omits is therefore harmless at
-!!   Rung 4: 121 is correct, converges better, and ~4x faster than FD-complete.
-!!   Rung 5 retargets THIS branch to 021 (analytic-complete) once the reciprocal
-!!   GTODN entries are added to get_jacobian, keeping 022 as the oracle it is
-!!   verified against.
+!! coag OFF                    -> 121 (MOSS=1: solver probes the pattern). Grains
+!!   frozen, live divisor inactive; reproduces nmgc-2.0 bit-for-bit
+!!   (equivalence.sh), which MOSS=0/MITER=2 would break.
+!! coag ON, sparsity=symbolic  -> 021 (MOSS=0: supplied symbolic pattern + analytic
+!!   get_jacobian). Rung 5c. The reciprocal GTODN entries are supplied analytically,
+!!   and the symbolic superset carries by construction the three couplings that are
+!!   zero at a single probe state but live later -- live divisor pre-ice,
+!!   photodesorption at SUMLAY~0, LH reciprocal at t=0 -- which a MOSS=1 probe can
+!!   silently drop. 021 ties 121 on convergence and is bit-identical (both MITER=1);
+!!   the symbolic pattern is the guarantee. See docs/PhaseII_rung5_site_classification.md.
+!! coag ON, sparsity=numerical -> 121 (021 would FATAL: the numerical pattern omits
+!!   the live-divisor block).
 !!
 !! Oracle override: NEMO_ORACLE_MF forces the flag (e.g. 22 = FD-complete: MOSS=0 +
-!!   complete symbolic pattern + MITER=2). Intended for the gate/oracle harness with
-!!   coagulation on and sparsity=symbolic; never set in production configs.
+!!   complete symbolic pattern + MITER=2). For the gate/oracle harness only; never
+!!   set in production configs.
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 integer function solver_method_flag()
 use global_variables
