@@ -357,8 +357,9 @@ subroutine dust_coagulation_set_rates()
   real(double_precision) :: w1, w2, kern
   logical :: is_overflow
 
-  if (trim(coagulation_kernel) == 'constant' .and. constant_kernel_k0 <= 0.d0) then
-    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for the constant kernel.'
+  if ((trim(coagulation_kernel) == 'constant' .or. trim(coagulation_kernel) == 'additive') &
+      .and. constant_kernel_k0 <= 0.d0) then
+    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for the constant/additive kernel.'
     call exit(31)
   endif
 
@@ -453,9 +454,18 @@ function coag_kernel_bare(i, j) result(kern)
     aj = grain_radii(j)
     mu = mass_grid(i) * mass_grid(j) / (mass_grid(i) + mass_grid(j))
     kern = (ai + aj)**2 * sqrt(8.d0 * PI * K_B * gas_temperature / mu)
+  case ('additive')
+    ! Golovin (sum/additive) kernel, VALIDATION ONLY: K_ij = B (m_i + m_j), with
+    ! B = constant_kernel_k0. Because this reuses constant_kernel_k0 as the prefactor,
+    ! its units for this case are [cm^3 s^-1 g^-1], NOT cm^3 s^-1 as for the constant
+    ! kernel (see parameters.in comment). Admits the closed-form n(m,t) of Golovin
+    ! (1963)/Scott (1968) with an exponential IC, used for the numerical-diffusion
+    ! convergence test. The 1/2 self-pair factor is applied downstream in
+    ! dust_coagulation_set_rates exactly as for the other kernels.
+    kern = constant_kernel_k0 * (mass_grid(i) + mass_grid(j))
   case default
     write(error_unit,'(3a)') 'Error (coagulation): unknown coagulation_kernel "', &
-      trim(coagulation_kernel), '" (v1 supports: constant, brownian).'
+      trim(coagulation_kernel), '" (v1 supports: constant, brownian, additive).'
     call exit(31)
   end select
   return
