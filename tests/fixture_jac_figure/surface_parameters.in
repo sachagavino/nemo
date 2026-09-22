@@ -1,0 +1,12 @@
+! Spec        m/mH  ED(K) Eb(K) dEb(K)                           dHf(kcal/mol)
+JH            1   650.  230. 3.0E+01 Herma, Ebfac=50%         *  +51.63
+JH2           2   440.  220. 0.0e+00 Herma, Ebfac=50%         *    0.00
+JO           16   800.    0. 7.5e-04                          *  +59.00
+JOH          17  2850.    0. 0.0e+00 H2O/2                    *   +8.80
+JH2O         18  5700.    0. 0.0e+00 Herma's suggestion       *  -57.10
+JCO          28  1150.    0. 0.0e+00 Herma's suggestion       *  -27.20
+JHCO         29  1600.    0. 0.0e+00 CO+H                     *  +10.00
+JH2CO        30  2050.    0. 0.0e+00 HCO+H                    *  -25.10
+JCH3OH       32  5534.    0. 0.0e+00 Collings                 *  -45.40
+JCH2OH       31  5084.    0. 0.0e+00 CH3OH-H                  *   -2.70
+JCH3O        31  5084.    0. 0.0e+00 CH2OH                    *    4.25
