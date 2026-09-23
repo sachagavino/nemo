@@ -131,7 +131,7 @@ def write_grid_table(path, radii, n_k, T_d=10.0, T_CR=15.0):
         f.write("! columns: radius[cm]  1/n_k[per-H^-1]  T_d[K]  T_CR_peak[K]\n")
         f.write("! T_d/T_CR are placeholders: constant/additive kernels do not use them.\n")
         for a, nk in zip(radii, n_k):
-            gtodn = 1.0e300 if nk <= 0.0 else 1.0 / nk   # empty-bin convention (cf. dust_ic_monodisperse)
+            gtodn = 1.0e300 if nk <= 1.0e-290 else 1.0 / nk   # empty/underflowed bin (cf. dust_ic_monodisperse)
             f.write(f"{a:.15E}  {gtodn:.15E}  {T_d:.6E}  {T_CR:.6E}\n")
 
 
