@@ -158,7 +158,9 @@ def main():
     times = [float(s) for s in args.times.split(",")]
     data, times = run(args.a_min, args.a_max, args.mass_ratio, args.rho, args.m0_radius,
                       args.N0, args.K0, args.nH, times, args.datadir)
-    plot(data, times, os.path.join(ROOT, "figures", "coag_dustpy_comparison"))
+    # plotting is split out into scripts/plot_compare_dustpy.py (reads the dumped TSVs);
+    # this script only runs the codes and dumps figures/coag_dustpy_data/*.tsv.
+    print("data dumped; plot with: python3 scripts/plot_compare_dustpy.py")
 
 
 if __name__ == "__main__":
