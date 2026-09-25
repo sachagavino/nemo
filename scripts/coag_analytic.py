@@ -70,15 +70,19 @@ def build_grid(a_min, a_max, mass_ratio, rho):
 
 
 def exp_ic_bins(masses, N0, m0):
-    """Exponential IC binned as 'number in [m_k, m_{k+1}) assigned to m_k'
-    (the convention 1d uses when binning the analytic solution). Top bin gets
-    the remaining tail [m_N, inf). Returns n_k [number per H per bin]."""
+    """Exponential IC as number per bin, integrated over the bin CENTERED on each
+    grid point m_k (geometric-mean edges [sqrt(m_{k-1}m_k), sqrt(m_k m_{k+1})]).
+    This is consistent with representing n_k as grains AT m_k and reconstructing a
+    density n_k/Delta m_k on the same edges -- so the IC and the density agree, and
+    NEMO matches DustPy / the analytic (both point-evaluate the density at m_k) at
+    t0. Returns n_k [number per H per bin]."""
     nb = masses.size
-    n_k = np.empty(nb)
-    lo = np.exp(-masses / m0)
-    n_k[:-1] = N0 * (lo[:-1] - lo[1:])
-    n_k[-1] = N0 * lo[-1]                     # tail into the top bin
-    return n_k
+    edges = np.empty(nb + 1)
+    edges[1:-1] = np.sqrt(masses[:-1] * masses[1:])
+    edges[0] = masses[0] / np.sqrt(masses[1] / masses[0])
+    edges[-1] = masses[-1] * np.sqrt(masses[-1] / masses[-2])
+    lo = np.exp(-edges / m0)
+    return N0 * (lo[:-1] - lo[1:])              # integral over [e_k, e_{k+1}]
 
 
 # --------------------------------------------------------------------------

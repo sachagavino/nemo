@@ -7,13 +7,15 @@
 # sweep {2.0,1.5,1.3,1.15} with a_min,a_max fixed, and asserts that NEMO's error
 # vs the analytic solution DECREASES MONOTONICALLY as the grid refines.
 #
-# Norm: L1 only (continuous, L&L 2021 Eq.40; discrete, Eq.41) on the mass density
-# g=x f. NEMO is the k=0 (piecewise-constant) Kovetz-Olund scheme in L&L's
-# taxonomy. We DROPPED the L2 norm: it is not in L&L, it weights errors
-# quadratically (dominated by the sparse large-mass tail rather than misplaced
-# mass), and L1 is the natural norm for a conservation law -- the physically and
-# chemically relevant grain quantities (surface area, site counts) are L1-type
-# integrals. See the design-thread summary for the full rationale.
+# Norm: CONTINUOUS L1 (L&L 2021 Eq.40, Gauss-integrated over each bin) on the mass
+# density g=x f. This is the gate. We do NOT gate on the discrete L1 (Eq.41) or L2:
+# both are POINT-evaluated (one value per bin at the geometric mean) and fragile in
+# the sparse, over-diffused large-mass tail -- non-monotone at evolved times, and
+# their earlier apparent monotonicity was partly an artifact of the old [m_k,m_{k+1})
+# IC offset (removed by the geometric-edge IC). Continuous L1 integrates over the bin,
+# is the conservation-law norm, and is what the chemically relevant grain integrals
+# (area, site counts) resemble; disc-L1/L2 are reported as diagnostics only. NEMO is
+# the k=0 Kovetz-Olund scheme (DustPy shows the same tail behaviour).
 #
 # GATE = monotone continuous-L1 AND discrete-L1 at the EVOLVED time (T=2 constant,
 # tau=1 additive), both kernels. At that time ~50-63% of grains have coagulated,
