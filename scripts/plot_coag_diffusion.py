@@ -101,15 +101,19 @@ def plot(datadir, ext):
     # ---------- Panel B ----------
     by_kernel = defaultdict(list)
     for r in pb:
-        by_kernel[r["kernel"]].append((int(r["nbins"]), float(r["cont_L1"]), float(r["disc_L1"])))
+        by_kernel[r["kernel"]].append((int(r["nbins"]), float(r["cont_L1"]),
+                                       float(r["disc_L1"]),
+                                       float(r.get("a2_cont_L1", "nan"))))
     kstyle = {"constant": ("s", "#1f77b4"), "additive": ("^", "#2ca02c")}
     nb_all = []
     for kernel, rows in by_kernel.items():
         rows = np.array(sorted(rows))
         mk, col = kstyle[kernel]
-        axB.loglog(rows[:, 0], rows[:, 1], mk + "-", color=col, label=f"{kernel} cont-L1")
-        axB.loglog(rows[:, 0], rows[:, 2], mk + "--", color=col, mfc="none",
-                   label=f"{kernel} disc-L1")
+        axB.loglog(rows[:, 0], rows[:, 1], mk + "-", color=col, label=f"{kernel} cont-L1 (mass-w)")
+        axB.loglog(rows[:, 0], rows[:, 3], mk + "-.", color=col, mfc="none",
+                   label=f"{kernel} cont-L1 (area-w, $a^2$)")
+        axB.loglog(rows[:, 0], rows[:, 2], mk + ":", color=col, alpha=0.5,
+                   label=f"{kernel} disc-L1 (diag.)")
         nb_all += list(rows[:, 0])
         e0, nb0 = rows[0, 1], rows[0, 0]
     nb_ref = np.array(sorted(set(nb_all)), float)

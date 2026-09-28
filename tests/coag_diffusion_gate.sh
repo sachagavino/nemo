@@ -7,15 +7,17 @@
 # sweep {2.0,1.5,1.3,1.15} with a_min,a_max fixed, and asserts that NEMO's error
 # vs the analytic solution DECREASES MONOTONICALLY as the grid refines.
 #
-# Norm: CONTINUOUS L1 (L&L 2021 Eq.40, Gauss-integrated over each bin) on the mass
-# density g=x f. This is the gate. We do NOT gate on the discrete L1 (Eq.41) or L2:
-# both are POINT-evaluated (one value per bin at the geometric mean) and fragile in
-# the sparse, over-diffused large-mass tail -- non-monotone at evolved times, and
+# Norm: CONTINUOUS L1 (L&L 2021 Eq.40, Gauss-integrated over each bin). TWO
+# continuous-L1 norms are gated: the mass-weighted one on g=x f (the conservation-law
+# norm) AND the surface-area-weighted one on the number density (weight a^2 ~ m^(2/3)),
+# which is what the chemistry actually sees (accretion, monolayer site count ~ int a^2 n).
+# Both must decrease monotonically under refinement. If the area-weighted norm also
+# converges, the "over-diffused tail is chemically immaterial" claim is earned.
+# We do NOT gate on the discrete L1 (Eq.41) or L2: both are POINT-evaluated and fragile
+# in the sparse over-diffused large-mass tail -- non-monotone at evolved times, and
 # their earlier apparent monotonicity was partly an artifact of the old [m_k,m_{k+1})
-# IC offset (removed by the geometric-edge IC). Continuous L1 integrates over the bin,
-# is the conservation-law norm, and is what the chemically relevant grain integrals
-# (area, site counts) resemble; disc-L1/L2 are reported as diagnostics only. NEMO is
-# the k=0 Kovetz-Olund scheme (DustPy shows the same tail behaviour).
+# IC offset (removed by the geometric-edge IC). They are reported as diagnostics only.
+# NEMO is the k=0 Kovetz-Olund scheme (DustPy shows the same tail behaviour).
 #
 # GATE = monotone continuous-L1 AND discrete-L1 at the EVOLVED time (T=2 constant,
 # tau=1 additive), both kernels. At that time ~50-63% of grains have coagulated,

@@ -125,36 +125,50 @@ def _interp_n(times, n_of_t, t_target):
     return (1 - w) * n_of_t[j] + w * n_of_t[j + 1]
 
 
-def _f_dim(x, kernel, dimless_t):
+def _f_dim(kernel, x, dimless_t):
     return CA.n_constant(x, dimless_t) if kernel == "constant" else CA.n_additive(x, dimless_t)
 
 
 def _errors(mass, n_k, kernel, dimless_t, N0, m0):
     """L&L Eq.40 (continuous) / Eq.41 (discrete) relative L1 errors on the mass
-    density g=x f. L1 only: it has units of misplaced mass and is the natural norm
-    for a conservation law (L&L use L1; L2 dropped, see coag_diffusion_gate.sh)."""
+    density g=x f (L1 only; L2 dropped, see coag_diffusion_gate.sh), PLUS a
+    surface-area-weighted continuous L1 on the number density n=dN/dm.
+
+    The gate (cont-L1 on g=m*n) is mass-weighted -- the conservation-law norm. The
+    chemistry, however, reads the grains through surface area / monolayer site count
+    ~ integral a^2 n dm, which weights toward the over-diffused large-mass tail. So
+    we also compute the AREA-weighted error on the number density,
+      aL1 = int a^2 |n_num - n_ana| dm / int a^2 n_ana dm,   a^2 ~ m^(2/3),
+    (the geometric prefactor cancels in the ratio). This is NOT the g-integrand times
+    a^2 (that would be an m^(5/3) mass*area weight); it is the true surface-area
+    weight the chemistry actually sees."""
     edges = _bin_edges(mass)
     h = np.diff(edges)
     f_k = n_k / h                              # NEMO piecewise-constant number density /H
     xg, wg = leggauss(16)
-    ec1 = ec1_ref = ed1 = ed1_ref = 0.0
+    ec1 = ec1_ref = ed1 = ed1_ref = ea1 = ea1_ref = 0.0
     for k in range(mass.size):
         lo, hi = edges[k], edges[k + 1]
-        # continuous L1 (Eq.40), Gauss-16 over the bin
         xa = 0.5 * (hi - lo) * xg + 0.5 * (hi + lo)
-        g_num = xa * f_k[k]
-        g_ana = xa * (N0 / m0) * _f_dim(xa / m0, kernel, dimless_t)
-        ec1 += 0.5 * (hi - lo) * np.sum(wg * np.abs(g_num - g_ana))
-        ec1_ref += 0.5 * (hi - lo) * np.sum(wg * np.abs(g_ana))
+        nnum = f_k[k]                                          # dN/dm (piecewise const)
+        nana = (N0 / m0) * _f_dim(kernel, xa / m0, dimless_t)  # analytic dN/dm
+        # continuous L1 on mass density g = m * (dN/dm)  (the gate norm), Eq.40
+        gd = np.abs(xa * nnum - xa * nana)
+        ec1 += 0.5 * (hi - lo) * np.sum(wg * gd)
+        ec1_ref += 0.5 * (hi - lo) * np.sum(wg * np.abs(xa * nana))
+        # surface-area-weighted continuous L1 on number density, weight a^2 ~ m^(2/3)
+        wA = xa**(2.0 / 3.0)
+        ea1 += 0.5 * (hi - lo) * np.sum(wg * wA * np.abs(nnum - nana))
+        ea1_ref += 0.5 * (hi - lo) * np.sum(wg * wA * np.abs(nana))
         # discrete L1 (Eq.41), geometric-mean point
         xh = np.sqrt(lo * hi)
         gnh = xh * f_k[k]
-        fah = _f_dim(np.array([xh / m0]), kernel, dimless_t)[0] if kernel == "additive" \
-            else _f_dim(xh / m0, kernel, dimless_t)
+        fah = _f_dim(kernel, np.array([xh / m0]), dimless_t)[0] if kernel == "additive" \
+            else _f_dim(kernel, xh / m0, dimless_t)
         gah = xh * (N0 / m0) * fah
         ed1 += h[k] * abs(gnh - gah)
         ed1_ref += h[k] * abs(gah)
-    return dict(cL1=ec1 / ec1_ref, dL1=ed1 / ed1_ref)
+    return dict(cL1=ec1 / ec1_ref, dL1=ed1 / ed1_ref, aL1=ea1 / ea1_ref)
 
 
 def sweep(nmgc, kernel, ratios, dimless_t, a_min, a_max, rho, dtg, m0_radius, K0, nH):
@@ -168,7 +182,7 @@ def sweep(nmgc, kernel, ratios, dimless_t, a_min, a_max, rho, dtg, m0_radius, K0
           f"{'T' if kernel=='constant' else 'tau'}={dimless_t} ===")
     print(f"   fixed IC: m0={m0:.3e} g (a={m0_radius:.2e} cm), N0={N0:.3e} /H, "
           f"prefactor={prefac:.3e}")
-    print(f"   {'ratio':>6} {'nbins':>6} {'cont-L1':>11} {'disc-L1':>11}")
+    print(f"   {'ratio':>6} {'nbins':>6} {'cont-L1':>11} {'a2-cont-L1':>11} {'disc-L1':>11}")
     results = []
     for ratio in ratios:
         t_end_s = 3.0 * dimless_t / R_eff      # comfortably past the target time
@@ -181,15 +195,22 @@ def sweep(nmgc, kernel, ratios, dimless_t, a_min, a_max, rho, dtg, m0_radius, K0
         n_k = _interp_n(out["times"], out["n_of_t"], t_target_s / YR)
         e = _errors(out["mass"], n_k, kernel, dimless_t, out["N0"], m0)
         results.append((ratio, out["nb"], e))
-        print(f"   {ratio:6.2f} {out['nb']:6d} {e['cL1']:11.4e} {e['dL1']:11.4e}", flush=True)
-    # GATE on continuous L1 only (L&L Eq.40, integrated): it is the conservation-law
-    # norm and robust under refinement. disc-L1 (Eq.41) and L2 are POINT-evaluated and
-    # fragile in the sparse over-diffused tail (non-monotone at evolved times), so they
-    # are reported as diagnostics, not gated. See coag_diffusion_gate.sh.
+        print(f"   {ratio:6.2f} {out['nb']:6d} {e['cL1']:11.4e} {e['aL1']:11.4e} "
+              f"{e['dL1']:11.4e}", flush=True)
+    # GATE on the continuous (integrated) L1 norms: the mass-weighted cont-L1 (L&L
+    # Eq.40, conservation-law norm) AND the surface-area-weighted a2-cont-L1 (the
+    # weight the chemistry actually sees). Both must decrease monotonically. disc-L1
+    # (Eq.41) and L2 are POINT-evaluated and fragile in the sparse over-diffused tail,
+    # so they are reported as diagnostics, not gated. See coag_diffusion_gate.sh.
     print("   monotone continuous-L1 decrease as mass_ratio -> 1 (GATE):")
-    seqc = [e["cL1"] for (_, _, e) in results]
-    ok = all(seqc[i] > seqc[i + 1] for i in range(len(seqc) - 1))
-    print(f"     cont-L1: {'PASS' if ok else 'FAIL'}  ({' > '.join(f'{v:.2e}' for v in seqc)})")
+    ok = True
+    for key, name in (("cL1", "cont-L1 (mass-weighted)"),
+                      ("aL1", "a2-cont-L1 (area-weighted)")):
+        seq = [e[key] for (_, _, e) in results]
+        mono = all(seq[i] > seq[i + 1] for i in range(len(seq) - 1))
+        ok &= mono
+        print(f"     {name:26s}: {'PASS' if mono else 'FAIL'}  "
+              f"({' > '.join(f'{v:.2e}' for v in seq)})")
     seqd = [e["dL1"] for (_, _, e) in results]
     monod = all(seqd[i] > seqd[i + 1] for i in range(len(seqd) - 1))
     print(f"     disc-L1 (diagnostic, not gated): "
@@ -283,19 +304,29 @@ def dump_figure_data(nmgc, ratios, a_min, a_max, rho, dtg, m0_radius, K0, nH, ou
                 f.write(f"{tau}\t{mk:.6e}\t{gk:.6e}\n")
 
     # ---- Panel B: convergence errors (evolved time), both kernels ----
-    with open(os.path.join(outdir, "panelB.tsv"), "w") as f:
-        f.write("kernel\tmass_ratio\tnbins\tcont_L1\tdisc_L1\n")
-        for kernel, dim_t in (("constant", 2.0), ("additive", 1.0)):
-            pf = K0 if kernel == "constant" else K0 / m0
-            for ratio in ratios:
-                o = _run_nemo(nmgc, kernel, ratio, a_min, a_max, rho, N0, m0, pf, nH,
-                              stop_time_yr=(3.0 * dim_t / R_eff) / YR, nb_outputs=40)
-                tt = dim_t / (pf * nH * (o["N0"] if kernel == "constant" else o["M1"]))
-                nk = _interp_n(o["times"], o["n_of_t"], tt / YR)
-                e = _errors(o["mass"], nk, kernel, dim_t, o["N0"], m0)
-                f.write(f"{kernel}\t{ratio}\t{o['nb']}\t{e['cL1']:.6e}\t{e['dL1']:.6e}\n")
+    # Also dump the per-(kernel,resolution) number distribution at the evolved time,
+    # so weighted re-analyses (e.g. the a^2 surface-area check, or future weights) are
+    # pure post-processing with NO NEMO re-run.
+    fB = open(os.path.join(outdir, "panelB.tsv"), "w")
+    fB.write("kernel\tmass_ratio\tnbins\tcont_L1\ta2_cont_L1\tdisc_L1\n")
+    fD = open(os.path.join(outdir, "panelB_distributions.tsv"), "w")
+    fD.write("# number distribution n_k [/H] at the evolved time (T=2 const, tau=1 add),\n"
+             "# per kernel and resolution -- for weighted re-analysis without re-running NEMO.\n")
+    fD.write("kernel\tmass_ratio\tnbins\tmass_g\tn_k_perH\n")
+    for kernel, dim_t in (("constant", 2.0), ("additive", 1.0)):
+        pf = K0 if kernel == "constant" else K0 / m0
+        for ratio in ratios:
+            o = _run_nemo(nmgc, kernel, ratio, a_min, a_max, rho, N0, m0, pf, nH,
+                          stop_time_yr=(3.0 * dim_t / R_eff) / YR, nb_outputs=40)
+            tt = dim_t / (pf * nH * (o["N0"] if kernel == "constant" else o["M1"]))
+            nk = _interp_n(o["times"], o["n_of_t"], tt / YR)
+            e = _errors(o["mass"], nk, kernel, dim_t, o["N0"], m0)
+            fB.write(f"{kernel}\t{ratio}\t{o['nb']}\t{e['cL1']:.6e}\t{e['aL1']:.6e}\t{e['dL1']:.6e}\n")
+            for mk, nkk in zip(o["mass"], nk):
+                fD.write(f"{kernel}\t{ratio}\t{o['nb']}\t{mk:.6e}\t{nkk:.6e}\n")
+    fB.close(); fD.close()
     print(f"wrote figure data to {outdir}/ (panelA_nemo.tsv, panelA_analytic.tsv, "
-          f"panelB.tsv, meta.txt)")
+          f"panelB.tsv [+a2_cont_L1], panelB_distributions.tsv, meta.txt)")
 
 
 FIXDIR = None
