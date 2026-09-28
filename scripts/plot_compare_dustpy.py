@@ -27,7 +27,7 @@ from collections import defaultdict
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")
+# matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -61,14 +61,16 @@ def figure_l1(datadir, ext):
             l1D.append(np.sum(np.abs(d - e)))
         ax.plot(ts, l1N, "o-", color=KCOL[kernel], label=f"{kernel}: NEMO")
         ax.plot(ts, l1D, "x--", color=KCOL[kernel], label=f"{kernel}: DustPy")
-    ax.set_xlabel("dimensionless time  T (constant) / \u03c4 (additive)")
-    ax.set_ylabel("relative L1 error vs exact analytic")
-    ax.set_title("NEMO and DustPy reach the analytic to comparable error\n"
-                 "(20-bin fiducial grid, k=0 scheme both codes)")
-    ax.legend(fontsize=8, frameon=False)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("dimensionless time  T (constant) / \u03c4 (additive)", fontsize=13)
+    ax.set_ylabel("relative L1 error vs exact analytic", fontsize=13)
+    ax.tick_params(labelsize=13)
+    #ax.set_title("NEMO and DustPy reach the analytic to comparable error\n"
+                 #"(20-bin fiducial grid, k=0 scheme both codes)")
+    ax.legend(fontsize=11, frameon=False)
+    #ax.grid(True, alpha=0.3)
+    
     out = os.path.join(ROOT, "figures", f"coag_dustpy_l1.{ext}")
-    fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
+    fig.tight_layout(); #fig.savefig(out, dpi=150); plt.close(fig)
     print(f"wrote {out}")
 
 
@@ -83,23 +85,26 @@ def figure_overlay(datadir, ext, times=(0.5, 1.0, 2.0)):
                 continue
             m, n, d, e = data[t]
             c = TAU_COLORS.get(t, "#333333")
-            ax.loglog(m, e, "-", color=c, lw=1.5, label=f"exact t*={t:g}")
+            ax.loglog(m, e, "-", color=c, lw=1.5, label=fr"exact ${"T"}={t:g}$")
             ax.loglog(m, n, "o", color=c, ms=5, mfc="none")
             ax.loglog(m, d, "x", color=c, ms=5)
             ymax = max(ymax, e.max())
-        ax.set_xlabel("grain mass m [g]")
-        ax.set_ylabel(r"normalised $N\,m^2$")
+        ax.set_xlabel("grain mass m [g]", fontsize=13)
+        ax.set_ylabel(r"normalised $N\,m^2$", fontsize=13)
         ax.set_title(f"{kernel} kernel")
         ax.set_ylim(ymax * 1e-5, ymax * 3)
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], color="0.3", lw=1.5, label="exact analytic"),
                Line2D([], [], color="0.3", marker="o", mfc="none", lw=0, label="NEMO"),
                Line2D([], [], color="0.3", marker="x", lw=0, label="DustPy")]
-    axes[0].legend(fontsize=8, frameon=False, loc="lower center")
-    axes[1].legend(handles=handles, fontsize=8, frameon=False, loc="upper right")
-    fig.suptitle("NEMO vs DustPy: same 0D coagulation problem, two independent codes")
+    axes[0].legend(fontsize=11, frameon=False, loc="lower right")
+    axes[1].legend(handles=handles, fontsize=11, frameon=False, loc="lower left")
+    axes[0].tick_params(labelsize=13)
+    axes[1].tick_params(labelsize=13)
+    #fig.suptitle("NEMO vs DustPy: same 0D coagulation problem, two independent codes")
     out = os.path.join(ROOT, "figures", f"coag_nemo_vs_dustpy.{ext}")
-    fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
+    fig.tight_layout(); #fig.savefig(out, dpi=150); plt.close(fig)
+    plt.show()
     print(f"wrote {out}")
 
 

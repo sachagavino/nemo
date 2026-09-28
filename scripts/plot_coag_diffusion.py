@@ -23,7 +23,7 @@ from collections import defaultdict
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")
+#matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 TAU_COLORS = {0.5: "#1b9e77", 1.0: "#d95f02", 2.0: "#7570b3"}
@@ -122,7 +122,8 @@ def plot(datadir, ext):
 
     fig.tight_layout()
     out = os.path.join(os.path.dirname(datadir) or ".", f"coag_diffusion.{ext}")
-    fig.savefig(out, dpi=150)
+    #fig.savefig(out, dpi=150)
+    plt.show()
     print(f"wrote {out}")
 
 
