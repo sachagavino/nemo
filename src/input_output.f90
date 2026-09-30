@@ -486,6 +486,17 @@ use global_variables
                              &fraction abundance'
   write(10,'(a,es10.3e2,a)') 'grain_abundance_floor = ', grain_abundance_floor, ' ! [grains/cm^3] floor on the grain &
                              &number density used as a DENOMINATOR (not the state variable); ~10 grains/AU^3. Consumed by Rung 3.'
+  ! Phase III split keys: written ONLY in split mode, so the rewritten parameters.in of a
+  ! coupled run is unchanged, while a split run keeps its configuration on re-run.
+  if (split_mode.ne.0) then
+    write(10,'(a)') '!*****************************'
+    write(10,'(a)') '!*   Phase III operator split *'
+    write(10,'(a)') '!*****************************'
+    write(10,'(a,i0,a)') 'split_mode = ', split_mode, ' ! 0 coupled (production), 1 Strang operator split'
+    write(10,'(a,a,a)') 'split_variant = ', split_variant, ' ! A {coag+ice}|{chem} ; B {coag+chem}|{ice transport}'
+    write(10,'(a,a,a)') 'split_order = ', split_order, ' ! CDC chem(dt/2)-dust(dt)-chem(dt/2) ; DCD'
+    write(10,'(a,es23.16e2,a)') 'split_dt = ', split_dt/YEAR, ' ! [yr] Strang macro-step'
+  endif
   close(10)
   
 end subroutine write_parameters
@@ -901,6 +912,14 @@ if (isDefined) then
       case('coagulation')                         ! Rung 1 master switch (0/1, like the other switches)
         read(value, '(i2)') coag_flag_tmp
         coagulation = (coag_flag_tmp /= 0)
+      case('split_mode')                          ! Phase III: 0 coupled (default), 1 Strang operator split
+        read(value, '(i2)') split_mode
+      case('split_variant')                       ! A {coag+ice}|{chem} ; B {coag+chem}|{ice}
+        read(value, *) split_variant
+      case('split_order')                         ! CDC (chem outermost) | DCD
+        read(value, *) split_order
+      case('split_dt')                            ! Strang macro-step [yr]; list-directed read
+        read(value, *) split_dt                   ! (an Ew.d edit would scale '1000' by 1e-6)
       case('coagulation_kernel')                  ! 'constant' (Rung 1) | 'brownian' (Rung 1b)
         read(value, *) coagulation_kernel
       case('constant_kernel_k0')                  ! [cm^3/s] constant kernel for the analytic gate
@@ -987,6 +1006,7 @@ end if
 
 START_TIME = START_TIME * YEAR
 STOP_TIME = STOP_TIME * YEAR
+split_dt = split_dt * YEAR
 
 
 

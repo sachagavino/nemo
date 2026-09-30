@@ -130,6 +130,12 @@ PROGRAM nmgc
         call exit(12)
     end select
 
+    ! Phase III: full active reaction range (coupled production path). The split driver
+    ! narrows it per sub-step and restores it; nothing else in the code writes it.
+    active_lo = 1
+    active_hi = nb_reactions
+    if (split_mode.ne.0) call split_setup_and_audit()
+
     current_time = 0.d0
     call cpu_time(code_start_time)
 
@@ -187,9 +193,15 @@ PROGRAM nmgc
       if (indNH2 >0) NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
       if (indNH3 >0) NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
 
+      if (split_mode.eq.0) then
       call integrate_chemical_scheme(delta_t=output_timestep, temp_abundances=abundances(1:nb_species), & ! Inputs
       i_tol=itol, a_tol=atol, i_task=itask, i_opt=iopt, m_f=mf, & ! Inputs
       i_state=istate) ! Output
+      else
+      ! Phase III operator-split path (isolated; never taken in production).
+      call integrate_split(delta_t=output_timestep, temp_abundances=abundances(1:nb_species), &
+      i_tol=itol, a_tol=atol, i_task=itask, i_opt=iopt, m_f=mf, i_state=istate)
+      endif
 
       if (istate.eq.-3) stop
 
@@ -278,6 +290,11 @@ PROGRAM nmgc
     write(stdo,'(a,i0)') '   RHS evals    NFE            = ', tot_nfe
     write(stdo,'(a,i0)') '   Jac/LU evals NJE            = ', tot_nje
     write(stdo,'(a,i0)') '   solver restarts (istate/=2) = ', tot_fail
+    write(stdo,'(a,i0)') '   sparse LU    NLU            = ', tot_nlu
+    write(stdo,'(a,i0)') '   cold starts  (ISTATE=1)     = ', tot_coldstart
+    if (split_mode.ne.0) write(stdo,'(a,i0)') '   Strang macro-steps          = ', tot_macro
+    call cpu_time(code_current_time)
+    write(stdo,'(a,es12.5)') '   CPU time [s]                = ', code_current_time - code_start_time
 
   elseif (do_outputs) then
     inquire(file='abundances.out', exist=isDefined)
@@ -354,6 +371,8 @@ PROGRAM nmgc
       tot_nst = tot_nst + int(iwork(11), 8)
       tot_nfe = tot_nfe + int(iwork(12), 8)
       tot_nje = tot_nje + int(iwork(13), 8)
+      tot_nlu = tot_nlu + int(iwork(21), 8)
+      tot_coldstart = tot_coldstart + 1
 
       ! Whenever the solver fails converging, print the reason.
       if (i_state.ne.2) then
@@ -365,6 +384,217 @@ PROGRAM nmgc
 
     return
   end subroutine integrate_chemical_scheme
+
+! =====================================================================================
+! Phase III (money-plot) operator-split driver. ISOLATED from the coupled path: it is
+! reached only when split_mode /= 0, and it shares nothing with the coupled integrator
+! except the RHS/Jacobian (masked by the active slot range) and set_work_arrays.
+! =====================================================================================
+
+  !> Validate the split configuration and report the mask audit (per-block counts).
+  subroutine split_setup_and_audit()
+    implicit none
+    integer :: c_lo, c_hi, d_lo, d_hi
+    if (is_3_phase.ne.0) then
+      write(Error_unit,'(a)') 'Error: split_mode requires the two-phase model (is_3_phase = 0).'
+      call exit(41)
+    endif
+    if (.not.coagulation) then
+      write(Error_unit,'(a)') 'Error: split_mode requires coagulation = 1 (nothing to split).'
+      call exit(41)
+    endif
+    if (split_dt.le.0.d0) then
+      write(Error_unit,'(a)') 'Error: split_mode requires split_dt > 0 [yr].'
+      call exit(41)
+    endif
+    if (split_variant.ne.'A' .and. split_variant.ne.'B') then
+      write(Error_unit,'(a)') 'Error: split_variant must be A or B.'
+      call exit(41)
+    endif
+    if (split_order.ne.'CDC' .and. split_order.ne.'DCD') then
+      write(Error_unit,'(a)') 'Error: split_order must be CDC or DCD.'
+      call exit(41)
+    endif
+    call split_block_range(1, c_lo, c_hi)
+    call split_block_range(2, d_lo, d_hi)
+    ! Mask audit: the two blocks are disjoint contiguous ranges whose union is [1, nb_reactions].
+    if (c_lo.ne.1 .or. d_hi.ne.nb_reactions .or. d_lo.ne.c_hi+1 .or. c_hi.lt.c_lo .or. d_hi.lt.d_lo) then
+      write(Error_unit,'(a)') 'Error: split mask audit failed (blocks not a partition of the reaction set).'
+      call exit(42)
+    endif
+    write(stdo,'(a)')       ' --- Phase III operator split ---'
+    write(stdo,'(a,a,a,a)') '   variant = ', split_variant, '   order = ', split_order
+    write(stdo,'(a,es12.5)') '   split_dt [yr]      = ', split_dt/YEAR
+    write(stdo,'(a,i0,a,i0,a,i0)') '   chem block slots   = [', c_lo, ',', c_hi, ']  count = ', c_hi-c_lo+1
+    write(stdo,'(a,i0,a,i0,a,i0)') '   dust block slots   = [', d_lo, ',', d_hi, ']  count = ', d_hi-d_lo+1
+    write(stdo,'(a,i0,a,i0,a,i0,a,i0)') '   nb_chem = ', nb_chemistry_reactions, '  nb_coag_grain = ', &
+          nb_coag_grain_reactions, '  nb_ice_transport = ', nb_coagulation_reactions-nb_coag_grain_reactions, &
+          '  total = ', nb_reactions
+  end subroutine split_setup_and_audit
+
+  !> Slot range of a block. iblock = 1 chem, 2 dust.
+  subroutine split_block_range(iblock, lo, hi)
+    implicit none
+    integer, intent(in)  :: iblock
+    integer, intent(out) :: lo, hi
+    integer :: boundary   ! last slot of the chem block
+    if (split_variant.eq.'A') then
+      boundary = nb_chemistry_reactions                              ! grain coag + ice -> dust
+    else
+      boundary = nb_chemistry_reactions + nb_coag_grain_reactions    ! ice transport only -> dust
+    endif
+    if (iblock.eq.1) then
+      lo = 1;          hi = boundary
+    else
+      lo = boundary+1; hi = nb_reactions
+    endif
+  end subroutine split_block_range
+
+  !> Advance one output interval by Strang macro-steps of split_dt. The state vector is
+  !! inherited across sub-steps untouched (no re-initialisation); the 1e-60 floor is applied
+  !! ONCE here, at the output boundary, exactly where the coupled integrator applies it.
+  subroutine integrate_split(delta_t, temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+    implicit none
+    real(double_precision), intent(in) :: delta_t, a_tol
+    integer, intent(in) :: i_tol, i_task, i_opt, m_f
+    integer, intent(out) :: i_state
+    real(double_precision), dimension(nb_species), intent(inout) :: temp_abundances
+    integer :: nmac, m, k
+    real(double_precision) :: h
+    character(len=16) :: envv
+    logical, save :: split_selfcheck_done = .false.
+
+    i_state = 2
+    if (delta_t.le.0.d0) return
+    nmac = nint(delta_t/split_dt)
+    if (nmac.lt.1 .or. abs(dfloat(nmac)*split_dt - delta_t).gt.1.d-9*delta_t) then
+      write(Error_unit,'(a,es12.5,a,es12.5,a)') 'Error: output interval ', delta_t/YEAR, &
+           ' yr is not an integer multiple of split_dt = ', split_dt/YEAR, ' yr.'
+      call exit(43)
+    endif
+    h = delta_t/dfloat(nmac)
+
+    do k=1,nb_species          ! output-boundary floor (identical to the coupled entry floor)
+      if (temp_abundances(k).le.1.d-60) temp_abundances(k) = 1.d-60
+    enddo
+
+    if (.not.split_selfcheck_done) then
+      call get_environment_variable('NEMO_SPLIT_SELFCHECK', envv)
+      if (len_trim(envv).gt.0) call split_selfcheck(temp_abundances)
+      split_selfcheck_done = .true.
+    endif
+
+    do m=1,nmac
+      if (split_order.eq.'CDC') then
+        call split_substep(1, 0.5d0*h, temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+        call split_substep(2, h,       temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+        call split_substep(1, 0.5d0*h, temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+      else
+        call split_substep(2, 0.5d0*h, temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+        call split_substep(1, h,       temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+        call split_substep(2, 0.5d0*h, temp_abundances, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+      endif
+      tot_macro = tot_macro + 1
+    enddo
+
+    active_lo = 1              ! restore the full range (coupled state) on exit
+    active_hi = nb_reactions
+  end subroutine integrate_split
+
+  !> One sub-step: a FRESH DLSODES solve (ISTATE=1, work arrays rebuilt) of the masked
+  !! system over [0, h]. Solver history is never carried across a mask switch; the
+  !! abundances are. No floor here (sec. 2c). Restarts after a failure also cold-start.
+  subroutine split_substep(iblock, h, Y, i_tol, a_tol, i_task, i_opt, m_f, i_state)
+    implicit none
+    integer, intent(in) :: iblock, i_tol, i_task, i_opt, m_f
+    real(double_precision), intent(in) :: h, a_tol
+    real(double_precision), dimension(nb_species), intent(inout) :: Y
+    integer, intent(out) :: i_state
+    real(double_precision) :: t
+    real(double_precision), dimension(nb_species) :: satol
+    integer :: k
+
+    call split_block_range(iblock, active_lo, active_hi)
+    t = 0.d0
+    do while (t.lt.h)
+      i_state = 1
+      do k=1,nb_species
+        satol(k) = max(a_tol, 1.d-16 * Y(k))
+      enddo
+      call set_work_arrays(Y=Y)
+      call dlsodes(get_temporal_derivatives,nb_species,Y,t,h,i_tol,RELATIVE_TOLERANCE,&
+      satol,i_task,i_state,i_opt,rwork,lrw,iwork,liw,get_jacobian,m_f)
+      tot_nst = tot_nst + int(iwork(11), 8)
+      tot_nfe = tot_nfe + int(iwork(12), 8)
+      tot_nje = tot_nje + int(iwork(13), 8)
+      tot_nlu = tot_nlu + int(iwork(21), 8)
+      tot_coldstart = tot_coldstart + 1
+      if (i_state.ne.2) then
+        tot_fail = tot_fail + 1
+        write(*,*) 'ISTATE = ', i_state, ' (split block ', iblock, ')'
+      endif
+    enddo
+  end subroutine split_substep
+
+  !> Debug self-check (NEMO_SPLIT_SELFCHECK=1), split mode only, once per run:
+  !!  (1) additivity  f_chem + f_dust == f_full  and  J_chem + J_dust == J_full (every column);
+  !!  (2) dust-block analytic Jacobian vs central FD of the masked dust RHS. The dust block is
+  !!      bilinear, so the central difference is exact up to round-off, and with chemistry masked
+  !!      the tiny coagulation entries are resolvable (they are not against the full RHS).
+  subroutine split_selfcheck(Y)
+    implicit none
+    real(double_precision), dimension(nb_species), intent(in) :: Y
+    real(double_precision), dimension(nb_species) :: fF, fC, fD, jF, jC, jD, fp, fm, Yp, jfd
+    real(double_precision) :: dum_ian(3), dum_jan(3), h, e_add_f, e_add_j, e_fd, scale, colmax
+    integer :: j, i, lo, hi, n_extra, n_missing, n_sig, n_unres
+    real(double_precision) :: fscale
+    integer :: save_lo, save_hi
+    save_lo = active_lo; save_hi = active_hi
+    call set_constant_rates()
+    active_lo = 1; active_hi = nb_reactions;   call get_temporal_derivatives(nb_species, 0.d0, Y, fF)
+    call split_block_range(1, lo, hi); active_lo = lo; active_hi = hi; call get_temporal_derivatives(nb_species, 0.d0, Y, fC)
+    call split_block_range(2, lo, hi); active_lo = lo; active_hi = hi; call get_temporal_derivatives(nb_species, 0.d0, Y, fD)
+    scale = maxval(abs(fF))
+    e_add_f = maxval(abs(fC + fD - fF)) / scale
+    e_add_j = 0.d0; e_fd = 0.d0; n_extra = 0; n_missing = 0; n_sig = 0; n_unres = 0
+    do j=1,nb_species
+      active_lo = 1; active_hi = nb_reactions
+      call get_temporal_derivatives(nb_species, 0.d0, Y, fp)          ! refresh dependant rates at Y
+      call get_jacobian(3, 0.d0, Y, j, dum_ian, dum_jan, jF)
+      call split_block_range(1, lo, hi); active_lo = lo; active_hi = hi
+      call get_temporal_derivatives(nb_species, 0.d0, Y, fp)
+      call get_jacobian(3, 0.d0, Y, j, dum_ian, dum_jan, jC)
+      call split_block_range(2, lo, hi); active_lo = lo; active_hi = hi
+      call get_jacobian(3, 0.d0, Y, j, dum_ian, dum_jan, jD)
+      colmax = max(maxval(abs(jF)), tiny(1.d0))
+      e_add_j = max(e_add_j, maxval(abs(jC + jD - jF)) / colmax)
+      ! central FD of the masked (dust) RHS in column j
+      h = 1.d-4 * abs(Y(j)); if (h.eq.0.d0) cycle
+      Yp = Y; Yp(j) = Y(j) + h; call get_temporal_derivatives(nb_species, 0.d0, Yp, fp)
+      Yp = Y; Yp(j) = Y(j) - h; call get_temporal_derivatives(nb_species, 0.d0, Yp, fm)
+      jfd = (fp - fm) / (2.d0*h)
+      ! An entry is RESOLVABLE by the FD only if its induced change 2h|J| clears the round-off
+      ! of f_i by a wide margin (1e-8 relative); below that the FD is 0 or noise by construction.
+      do i=1,nb_species
+        fscale = max(abs(fp(i)), abs(fm(i)), tiny(1.d0))
+        if (2.d0*h*max(abs(jD(i)),abs(jfd(i))).gt.1.d-8*fscale) then
+          n_sig = n_sig + 1
+          e_fd = max(e_fd, abs(jD(i)-jfd(i)) / max(abs(jD(i)),abs(jfd(i))))
+          if (jD(i).eq.0.d0) n_missing = n_missing + 1
+          if (jfd(i).eq.0.d0) n_extra = n_extra + 1
+        elseif (jD(i).ne.0.d0) then
+          n_unres = n_unres + 1
+        endif
+      enddo
+    enddo
+    active_lo = save_lo; active_hi = save_hi
+    write(stdo,'(a)') ' --- split self-check (NEMO_SPLIT_SELFCHECK) ---'
+    write(stdo,'(a,es10.3)') '   RHS additivity  max|f_C+f_D-f_full|/max|f_full|     = ', e_add_f
+    write(stdo,'(a,es10.3)') '   Jac additivity  max_col max|J_C+J_D-J_full|/max|J_full| = ', e_add_j
+    write(stdo,'(a,i0,a,es10.3)') '   dust Jac vs FD  (', n_sig, ' significant entries) max rel diff = ', e_fd
+    write(stdo,'(a,i0,a,i0)') '   dust Jac entries missing (FD>0, J=0) = ', n_missing, '   extra (J>0, FD=0) = ', n_extra
+    write(stdo,'(a,i0)') '   dust Jac entries below FD resolution (not tested)   = ', n_unres
+  end subroutine split_selfcheck
 
 END program nmgc
 

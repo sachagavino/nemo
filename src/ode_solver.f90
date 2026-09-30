@@ -671,6 +671,7 @@ PDJ2(1:nb_species+1) = 0.d0
 
 do i=1,nb_reactions_using_species(j)
   reaction_idx = relevant_reactions(i, j) ! j being the species index, given as a parameter
+  if (reaction_idx.lt.active_lo .or. reaction_idx.gt.active_hi) cycle ! Phase III split mask (never fires coupled)
 
   reactant1_idx = REACTION_COMPOUNDS_ID(1, reaction_idx)
   reactant2_idx = REACTION_COMPOUNDS_ID(2, reaction_idx)
@@ -788,6 +789,7 @@ if (dynamic_gtodn_active() .and. allocated(grain_col_bin)) then
   if (k.ge.1) then
     do i=1,gtodn_jac_n
       reaction_idx = gtodn_jac_list(i)
+      if (reaction_idx.lt.active_lo .or. reaction_idx.gt.active_hi) cycle ! Phase III split mask
       if (GRAIN_RANK(reaction_idx).ne.k) cycle
       if (gtodn_jac_dcoef(reaction_idx).eq.0.d0) cycle   ! gated off (below floor, cap inactive, rate 0)
 
@@ -867,7 +869,10 @@ real(double_precision) :: w1, w2, w3, w4, w5 ! per-product gain weights (compoun
   character(2) :: c_i
 
 
-if (.not. freeze_dependent_rates) call set_dependant_rates(y)
+! Phase III split: a dust-only block (active_lo > nb_chemistry_reactions) contains no
+! chemistry reaction, so the dependant (chemistry) rates are not needed. Skipping them is
+! numerically inert there. In coupled mode active_lo = 1 and this is the original call.
+if (.not. freeze_dependent_rates .and. active_lo.le.nb_chemistry_reactions) call set_dependant_rates(y)
 
 ! do j=1,nb_reactions
 ! write(*,*) reaction_rates(j),j,REACTION_TYPE(j)
@@ -881,7 +886,8 @@ YDTMP1(1:nb_species) = 0.d0
 YDTMP2(1:nb_species) = 0.d0
 
 ! The differential equations are calculated in a loop here
-do I=1,nb_reactions
+! Phase III split: assemble only the active reaction block. Coupled mode: [1, nb_reactions].
+do I=max(1,active_lo),min(nb_reactions,active_hi)
 
   reactant1_idx = REACTION_COMPOUNDS_ID(1, i)
   reactant2_idx = REACTION_COMPOUNDS_ID(2, i)

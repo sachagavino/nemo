@@ -44,6 +44,24 @@ real(double_precision)   :: constant_kernel_k0 = 0.d0       !< [cm^3/s] constant
 integer                  :: nb_chemistry_reactions = 0      !< reactions before coagulation is appended
 integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions (grain + ice transport)
 integer                  :: nb_coag_grain_reactions = 0     !< grain coagulation reactions (non-overflow unordered pairs)
+
+! ---- Phase III operator-split driver (branch money-plot-split). -------------------------
+! OFF by default (split_mode = 0): the coupled production path only ever sees the full
+! active range [1, nb_reactions], which leaves every RHS/Jacobian loop numerically
+! identical to phase2. In split mode the RHS and the Jacobian assemble ONLY the reactions
+! with slot index in [active_lo, active_hi]; both blocks of both variants are contiguous
+! slot ranges because the coagulation block is appended as [grain coag | ice transport].
+!   variant A: chem = [1, nb_chem]              dust = [nb_chem+1, nb_reactions]
+!   variant B: chem = [1, nb_chem+nb_coag_grain] dust = [nb_chem+nb_coag_grain+1, nb_reactions]
+integer                  :: active_lo = 1                   !< first active reaction slot
+integer                  :: active_hi = huge(1)             !< last active reaction slot (clipped to nb_reactions)
+integer                  :: split_mode = 0                  !< 0 = coupled (production), 1 = Strang operator split
+character(len=1)         :: split_variant = 'A'             !< 'A' {coag+ice}|{chem} ; 'B' {coag+chem}|{ice transport}
+character(len=3)         :: split_order = 'CDC'             !< 'CDC' chem(dt/2)-dust(dt)-chem(dt/2) ; 'DCD'
+real(double_precision)   :: split_dt = 0.d0                 !< Strang macro-step [s] (read in yr)
+integer(kind=8)          :: tot_nlu = 0                     !< total sparse LU decompositions (IWORK(21))
+integer(kind=8)          :: tot_coldstart = 0               !< total DLSODES cold starts (ISTATE=1 calls)
+integer(kind=8)          :: tot_macro = 0                   !< total Strang macro-steps
 integer                  :: nb_ice_transport_reactions = 0  !< ice-transport reactions (ordered non-overflow pairs x ice bases)
 integer                  :: coag_n_ordered_nonoverflow = 0  !< number of ORDERED non-overflow pairs (i,j), i,j=1..N
 integer                  :: nb_ice_bases = 0                 !< number of base ice species transported by coagulation
