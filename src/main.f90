@@ -463,6 +463,8 @@ PROGRAM nmgc
     real(double_precision) :: h
     character(len=16) :: envv
     logical, save :: split_selfcheck_done = .false.
+    integer, save :: n_interval = 0
+    integer :: k_check
 
     i_state = 2
     if (delta_t.le.0.d0) return
@@ -478,10 +480,21 @@ PROGRAM nmgc
       if (temp_abundances(k).le.1.d-60) temp_abundances(k) = 1.d-60
     enddo
 
+    ! NEMO_SPLIT_SELFCHECK=k : run the self-check at the start of the k-th output interval
+    ! (k=1 is the initial state; use a later k to check at an ice-rich state).
+    n_interval = n_interval + 1
     if (.not.split_selfcheck_done) then
       call get_environment_variable('NEMO_SPLIT_SELFCHECK', envv)
-      if (len_trim(envv).gt.0) call split_selfcheck(temp_abundances)
-      split_selfcheck_done = .true.
+      if (len_trim(envv).gt.0) then
+        read(envv, *, iostat=k) k_check
+        if (k.ne.0) k_check = 1
+        if (n_interval.eq.k_check) then
+          call split_selfcheck(temp_abundances)
+          split_selfcheck_done = .true.
+        endif
+      else
+        split_selfcheck_done = .true.
+      endif
     endif
 
     do m=1,nmac
@@ -546,8 +559,9 @@ PROGRAM nmgc
     real(double_precision), dimension(nb_species), intent(in) :: Y
     real(double_precision), dimension(nb_species) :: fF, fC, fD, jF, jC, jD, fp, fm, Yp, jfd
     real(double_precision) :: dum_ian(3), dum_jan(3), h, e_add_f, e_add_j, e_fd, scale, colmax
-    integer :: j, i, lo, hi, n_extra, n_missing, n_sig, n_unres
-    real(double_precision) :: fscale
+    integer :: j, i, lo, hi, n_extra, n_missing, n_sig, n_unres, n_cat
+    real(double_precision) :: fscale, e_ice, isum, iabs
+    integer :: n_ice
     integer :: save_lo, save_hi
     save_lo = active_lo; save_hi = active_hi
     call set_constant_rates()
@@ -556,7 +570,7 @@ PROGRAM nmgc
     call split_block_range(2, lo, hi); active_lo = lo; active_hi = hi; call get_temporal_derivatives(nb_species, 0.d0, Y, fD)
     scale = maxval(abs(fF))
     e_add_f = maxval(abs(fC + fD - fF)) / scale
-    e_add_j = 0.d0; e_fd = 0.d0; n_extra = 0; n_missing = 0; n_sig = 0; n_unres = 0
+    e_add_j = 0.d0; e_fd = 0.d0; n_extra = 0; n_missing = 0; n_sig = 0; n_unres = 0; n_cat = 0
     do j=1,nb_species
       active_lo = 1; active_hi = nb_reactions
       call get_temporal_derivatives(nb_species, 0.d0, Y, fp)          ! refresh dependant rates at Y
@@ -569,7 +583,10 @@ PROGRAM nmgc
       colmax = max(maxval(abs(jF)), tiny(1.d0))
       e_add_j = max(e_add_j, maxval(abs(jC + jD - jF)) / colmax)
       ! central FD of the masked (dust) RHS in column j
-      h = 1.d-4 * abs(Y(j)); if (h.eq.0.d0) cycle
+      ! The dust block is strictly bilinear (two-body terms with constant rates), so the central
+      ! difference is EXACT for any step; a large step keeps the signal far above the round-off
+      ! of the gross gain/loss terms (which, not |f_i|, set the FD noise floor).
+      h = 0.5d0 * abs(Y(j)); if (h.eq.0.d0) cycle
       Yp = Y; Yp(j) = Y(j) + h; call get_temporal_derivatives(nb_species, 0.d0, Yp, fp)
       Yp = Y; Yp(j) = Y(j) - h; call get_temporal_derivatives(nb_species, 0.d0, Yp, fm)
       jfd = (fp - fm) / (2.d0*h)
@@ -579,13 +596,41 @@ PROGRAM nmgc
         fscale = max(abs(fp(i)), abs(fm(i)), tiny(1.d0))
         if (2.d0*h*max(abs(jD(i)),abs(jfd(i))).gt.1.d-8*fscale) then
           n_sig = n_sig + 1
-          e_fd = max(e_fd, abs(jD(i)-jfd(i)) / max(abs(jD(i)),abs(jfd(i))))
+          ! Grain rows vs ice columns: grains are CATALYSTS of the ice-transport pseudo-reactions
+          ! (J_iX + GRAIN_j -> ... + GRAIN_j), so the RHS does (f - r) + r with r >> f(GRAIN_j);
+          ! the residue is ~ulp(r) and depends on Y(J_iX). The analytic zero is exact; count these
+          ! separately (catalyst round-off) instead of as missing entries.
+          if (jD(i).eq.0.d0 .and. SPECIES_PHASE(i).eq.0 .and. SPECIES_PHASE(j).eq.1 .and. &
+              index(species_name(i),'GRAIN').eq.1) then
+            n_sig = n_sig - 1; n_cat = n_cat + 1; cycle
+          endif
           if (jD(i).eq.0.d0) n_missing = n_missing + 1
           if (jfd(i).eq.0.d0) n_extra = n_extra + 1
+          e_fd = max(e_fd, abs(jD(i)-jfd(i)) / max(abs(jD(i)),abs(jfd(i))))
+          if (abs(jD(i)-jfd(i)).gt.1.d-3*max(abs(jD(i)),abs(jfd(i)))) &
+            write(stdo,'(a,a12,a,a12,a,es12.4,a,es12.4,a,es11.3,a,es11.3,a,es11.3)') '   [FDdiff] d f(', species_name(i), &
+            ')/dY(', species_name(j), ')  J=', jD(i), '  FD=', jfd(i), '  Yj=', Y(j), '  Yi=', Y(i), '  f_i=', fp(i)
         elseif (jD(i).ne.0.d0) then
           n_unres = n_unres + 1
         endif
       enddo
+    enddo
+    ! (3) dust-block per-species ice conservation: coagulation + ice transport only move ice
+    !     between bins, so for every base ice X, sum_k f_D(J_k X) = 0 (relative to sum_k |f_D|).
+    call split_block_range(2, lo, hi); active_lo = lo; active_hi = hi
+    call get_temporal_derivatives(nb_species, 0.d0, Y, fD)
+    e_ice = 0.d0; n_ice = 0
+    do i=1,nb_species
+      if (SPECIES_PHASE(i).ne.1 .or. SPECIES_GRAIN_RANK(i).ne.1) cycle   ! one representative bin per base ice
+      isum = 0.d0; iabs = 0.d0
+      do j=1,nb_species
+        if (SPECIES_PHASE(j).ne.1 .or. SPECIES_GRAIN_RANK(j).eq.0) cycle
+        if (trim(species_name(j)(4:)).ne.trim(species_name(i)(4:))) cycle
+        isum = isum + fD(j); iabs = iabs + abs(fD(j))
+      enddo
+      if (iabs.gt.0.d0) then
+        e_ice = max(e_ice, abs(isum)/iabs); n_ice = n_ice + 1
+      endif
     enddo
     active_lo = save_lo; active_hi = save_hi
     write(stdo,'(a)') ' --- split self-check (NEMO_SPLIT_SELFCHECK) ---'
@@ -594,6 +639,9 @@ PROGRAM nmgc
     write(stdo,'(a,i0,a,es10.3)') '   dust Jac vs FD  (', n_sig, ' significant entries) max rel diff = ', e_fd
     write(stdo,'(a,i0,a,i0)') '   dust Jac entries missing (FD>0, J=0) = ', n_missing, '   extra (J>0, FD=0) = ', n_extra
     write(stdo,'(a,i0)') '   dust Jac entries below FD resolution (not tested)   = ', n_unres
+    write(stdo,'(a,i0)') '   grain-row/ice-col catalyst round-off (analytic 0 exact) = ', n_cat
+    write(stdo,'(a,i0,a,es10.3)') '   dust-block ice conservation (', n_ice, &
+         ' ice species) max |sum_k f_D(J_k X)| / sum_k |f_D(J_k X)| = ', e_ice
   end subroutine split_selfcheck
 
 END program nmgc
