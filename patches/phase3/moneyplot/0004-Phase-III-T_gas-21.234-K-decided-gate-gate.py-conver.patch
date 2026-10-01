@@ -1,0 +1,161 @@
+From b99fc1ee9402c41c1d782a309ac2bda2bc8a3152 Mon Sep 17 00:00:00 2001
+From: executor <executor@nemo>
+Date: Thu, 1 Oct 2026 10:25:11 +0000
+Subject: [PATCH 4/4] Phase III (T_gas=21.234 K): decided gate (gate.py),
+ convergence orders incl. t<=8 kyr (order.py), top-bin ice analysis
+ (topbin.py); gate/order/c1 results
+
+---
+ .../data_Tgas21/gate_order_c1_topbin.txt      | 38 +++++++++++++++++++
+ tests/phase3_split/gate.py                    | 38 +++++++++++++++++++
+ tests/phase3_split/order.py                   | 22 +++++++++++
+ tests/phase3_split/topbin.py                  | 18 +++++++++
+ 4 files changed, 116 insertions(+)
+ create mode 100644 tests/phase3_split/data_Tgas21/gate_order_c1_topbin.txt
+ create mode 100644 tests/phase3_split/gate.py
+ create mode 100644 tests/phase3_split/order.py
+ create mode 100644 tests/phase3_split/topbin.py
+
+diff --git a/tests/phase3_split/data_Tgas21/gate_order_c1_topbin.txt b/tests/phase3_split/data_Tgas21/gate_order_c1_topbin.txt
+new file mode 100644
+index 0000000..ac875a3
+--- /dev/null
++++ b/tests/phase3_split/data_Tgas21/gate_order_c1_topbin.txt
+@@ -0,0 +1,38 @@
++== GATE A_CDC_25 vs ref_1e-8
++ (i)  per-bin CO ice 4.48e-05  gas CO 2.39e-05  total CO ice 3.23e-06   -> PASS (<0.0001)
++ (ii) grain bins (totals) 5.02e-08  -> PASS
++ (iii) drift run/ref: charge 3.7e-25/3.3e-25  H 7.4e-13/6.8e-14  C 2.6e-13/1.0e-14  O 2.3e-13/7.0e-15  dust 1.3e-11/4.6e-12  -> PASS
++ (iv) mask audit: chem [1,2284] dust [2285,10967] of 10967  -> PASS
++ diagnostic (not gated): all-species max (gas+ice>1e-12) 3.90e-03  [J20CH3OH @ 10000 yr]
++
++--- A_CDC_*  full window
++  jco  err: 3.3e-02 1.2e-02 6.1e-03 1.3e-03 2.0e-04 4.5e-05   local order: 1.45 0.98 1.66 2.78 2.13
++  co   err: 7.4e-03 4.4e-03 2.7e-03 1.2e-03 3.3e-04 2.4e-05   local order: 0.75 0.69 0.88 1.89 3.79
++  all  err: 1.4e-01 2.8e-02 2.2e-02 1.1e-02 8.2e-03 3.9e-03   local order: 2.36 0.36 0.78 0.37 1.07
++--- A_CDC_*  t<=8 kyr (c2)
++  jco  err: 3.3e-02 1.2e-02 6.1e-03 1.3e-03 2.0e-04 4.5e-05   local order: 1.45 0.98 1.66 2.78 2.13
++  co   err: 7.4e-03 4.4e-03 2.7e-03 1.2e-03 3.3e-04 2.4e-05   local order: 0.75 0.69 0.88 1.89 3.79
++  all  err: 3.3e-02 1.2e-02 6.1e-03 1.8e-03 1.1e-03 5.5e-04   local order: 1.45 0.98 1.32 0.67 1.06
++
++### c1 smoothed-kink build
++--- S_A_CDC_*  full window
++  jco  err: 3.3e-02 1.2e-02 6.1e-03 1.3e-03 1.9e-04 4.5e-05   local order: 1.46 0.98 1.66 2.79 2.12
++  co   err: 7.4e-03 4.4e-03 2.7e-03 1.2e-03 3.3e-04 2.4e-05   local order: 0.75 0.68 0.88 1.90 3.80
++  all  err: 4.8e-01 1.2e-01 2.7e-02 1.0e-02 8.0e-03 4.1e-03   local order: 1.99 2.16 1.03 0.39 0.96
++--- S_A_CDC_*  t<=8 kyr (c2)
++  jco  err: 3.3e-02 1.2e-02 6.1e-03 1.3e-03 1.9e-04 4.5e-05   local order: 1.46 0.98 1.66 2.79 2.12
++  co   err: 7.4e-03 4.4e-03 2.7e-03 1.2e-03 3.3e-04 2.4e-05   local order: 0.75 0.68 0.88 1.90 3.80
++  all  err: 3.3e-02 1.2e-02 6.1e-03 1.8e-03 1.1e-03 5.5e-04   local order: 1.46 0.98 1.32 0.67 1.07
++
++t[yr]  CO-ice share bins18-20  | monolayers bins 1,4,8,12,16,20 | split rel.err of JkCO, bins 1..20 (x1e-3)
++  1000   0.079   |    0.1    0.4    5.0    8.3  614.0  595.0 |  7.8  9.2 16.8 33.0  8.3  5.4  9.0  9.7  9.6  9.4  9.3  9.2  9.1  9.0  9.0  8.9  8.9  8.9  8.8  8.2
++  2000   0.083   |    0.1    0.7    9.9   18.3  501.8  481.1 |  4.7  5.6 10.0 20.3  7.8  2.2  5.0  5.6  5.5  5.4  5.3  5.2  5.1  5.0  5.0  4.9  4.9  4.9  4.8  4.1
++  3000   0.086   |    0.2    1.1   15.3   31.1  441.9  422.9 |  3.2  3.9  7.1 14.5  6.3  1.0  3.4  3.9  3.9  3.8  3.7  3.6  3.5  3.5  3.4  3.4  3.4  3.4  3.3  2.7
++  4000   0.087   |    0.3    1.5   21.1   47.3  400.5  383.4 |  2.4  3.0  5.5 11.2  5.0  0.5  2.5  3.0  3.0  3.0  2.9  2.8  2.7  2.7  2.7  2.6  2.6  2.6  2.6  2.0
++  5000   0.089   |    0.4    1.8   27.3   67.6  364.1  348.6 |  1.8  2.4  4.5  9.1  4.0  0.3  2.0  2.4  2.5  2.4  2.4  2.3  2.3  2.2  2.2  2.2  2.2  2.1  2.1  1.6
++  6000   0.090   |    0.4    2.2   33.8   92.5  327.5  313.9 |  1.5  1.9  3.7  7.6  3.3  0.2  1.6  2.0  2.1  2.1  2.0  2.0  1.9  1.9  1.9  1.9  1.8  1.8  1.8  1.4
++  7000   0.091   |    0.6    2.6   40.2  122.1  289.8  278.1 |  1.2  1.6  3.2  6.4  2.8  0.1  1.3  1.7  1.8  1.8  1.7  1.7  1.7  1.6  1.6  1.6  1.6  1.6  1.6  1.2
++  8000   0.093   |    0.7    3.0   45.9  155.6  253.2  243.5 |  1.2  1.6  2.8  5.5  2.5  0.0  1.1  1.4  1.5  1.5  1.5  1.4  1.4  1.4  1.4  1.4  1.3  1.3  1.3  1.0
++  9000   0.095   |    0.7    3.2   50.3  185.4  227.0  219.2 |  5.3  5.2  5.2  5.9  2.8  0.4  0.6  1.0  1.1  1.1  1.0  1.0  0.9  1.3  0.9  1.0  1.0  1.0  0.9  0.7
++ 10000   0.098   |    0.8    3.3   53.2  199.7  227.6  220.7 |  3.9  4.8  9.5  8.9  5.0  1.5  0.0  0.4  0.5  0.5  0.4  0.3  0.5  1.0  0.7  0.3  0.4  0.4  0.4  0.1
++ 10000   0.098   |    0.8    3.3   53.2  199.7  227.6  220.7 |  3.9  4.8  9.5  8.9  5.0  1.5  0.0  0.4  0.5  0.5  0.4  0.3  0.5  1.0  0.7  0.3  0.4  0.4  0.4  0.1
+diff --git a/tests/phase3_split/gate.py b/tests/phase3_split/gate.py
+new file mode 100644
+index 0000000..14b4a6d
+--- /dev/null
++++ b/tests/phase3_split/gate.py
+@@ -0,0 +1,38 @@
++"""Phase III correctness gate as defined in the design-thread decision note (sec. 1)."""
++import sys, re, numpy as np, compare as C
++TOL=1e-4; CUT=1e-12
++def gate(ref, run, verbose=True):
++    nr,Tr,Yr=C.read(ref); ns,Ts,Ys=C.read(run); ng=20
++    jco=[nr.index('J%02dCO'%k) for k in range(1,ng+1)]; co=nr.index('CO')
++    g=[(nr.index('GRAIN%02d'%k),nr.index('GRAIN%02d-'%k)) for k in range(1,ng+1)]
++    ng_,g0,gm,chem,_=C.classes(nr)
++    e_jco=e_co=e_tot=e_gr=e_all=0.; worst=''
++    for i,t in enumerate(Ts):
++        if t<=0: continue
++        j=np.argmin(abs(Tr-t)); yr,ys=Yr[j],Ys[i]
++        for k in jco:
++            if yr[k]>CUT: e_jco=max(e_jco,abs(ys[k]-yr[k])/yr[k])
++        if yr[co]>CUT: e_co=max(e_co,abs(ys[co]-yr[co])/yr[co])
++        e_tot=max(e_tot,abs(ys[jco].sum()-yr[jco].sum())/yr[jco].sum())
++        for a,b in g: e_gr=max(e_gr,abs(ys[a]+ys[b]-yr[a]-yr[b])/(yr[a]+yr[b]))
++        sel=[k for k in chem if yr[k]>CUT]; r=np.abs(ys[sel]-yr[sel])/yr[sel]
++        if r.max()>e_all: e_all=r.max(); worst=f"{nr[sel[int(np.argmax(r))]]} @ {t:.0f} yr"
++    m=C.mass_grid(ref); cr=C.conservation(ref,m); cs=C.conservation(run,m)
++    res=dict(jco=e_jco,co=e_co,tot=e_tot,grain=e_gr)
++    ok_i=max(e_jco,e_co,e_tot)<TOL; ok_ii=e_gr<TOL
++    # (iii) 'conserved to the coupled tolerance': executor-proposed explicit bound 1e-10 relative
++    # (100x below rtol 1e-8); the ratio to the coupled drift is reported alongside.
++    ok_iii=all(cs[k]<1e-10 for k in ('charge','H','C','O','dust'))
++    log=open(run+'/run.log').read()
++    m_aud=re.search(r'chem block slots\s+=\s+\[(\d+),(\d+)\].*?dust block slots\s+=\s+\[(\d+),(\d+)\].*?total = (\d+)',log,re.S)
++    ok_iv=bool(m_aud) and int(m_aud[1])==1 and int(m_aud[3])==int(m_aud[2])+1 and int(m_aud[4])==int(m_aud[5])
++    if verbose:
++        print(f"== GATE {run} vs {ref}")
++        print(f" (i)  per-bin CO ice {e_jco:.2e}  gas CO {e_co:.2e}  total CO ice {e_tot:.2e}   -> {'PASS' if ok_i else 'FAIL'} (<{TOL:g})")
++        print(f" (ii) grain bins (totals) {e_gr:.2e}  -> {'PASS' if ok_ii else 'FAIL'}")
++        print(f" (iii) drift run/ref: "+"  ".join(f"{k} {cs[k]:.1e}/{cr[k]:.1e}" for k in ('charge','H','C','O','dust'))+f"  -> {'PASS' if ok_iii else 'FAIL'}")
++        print(f" (iv) mask audit: chem [{m_aud[1]},{m_aud[2]}] dust [{m_aud[3]},{m_aud[4]}] of {m_aud[5]}  -> {'PASS' if ok_iv else 'FAIL'}")
++        print(f" diagnostic (not gated): all-species max (gas+ice>1e-12) {e_all:.2e}  [{worst}]")
++    return ok_i and ok_ii and ok_iii and ok_iv, res
++if __name__=='__main__':
++    for run in sys.argv[2:]: gate(sys.argv[1],run)
+diff --git a/tests/phase3_split/order.py b/tests/phase3_split/order.py
+new file mode 100644
+index 0000000..a06c674
+--- /dev/null
++++ b/tests/phase3_split/order.py
+@@ -0,0 +1,22 @@
++"""Measured convergence orders, full window and t<=8 kyr (c2), for a set of runs vs a reference."""
++import sys, numpy as np, compare as C
++CUT=1e-12
++def errs(ref, run, tmax):
++    nr,Tr,Yr=C.read(ref); ns,Ts,Ys=C.read(run)
++    jco=[nr.index('J%02dCO'%k) for k in range(1,21)]; co=nr.index('CO'); _,_,_,chem,_=C.classes(nr)
++    e=dict(jco=0.,co=0.,all=0.)
++    for i,t in enumerate(Ts):
++        if t<=0 or t>tmax: continue
++        j=np.argmin(abs(Tr-t)); yr,ys=Yr[j],Ys[i]
++        for k in jco:
++            if yr[k]>CUT: e['jco']=max(e['jco'],abs(ys[k]-yr[k])/yr[k])
++        e['co']=max(e['co'],abs(ys[co]-yr[co])/yr[co])
++        sel=[k for k in chem if yr[k]>CUT]; e['all']=max(e['all'],(np.abs(ys[sel]-yr[sel])/yr[sel]).max())
++    return e
++ref=sys.argv[1]; pre=sys.argv[2]; dts=[1000,500,250,100,50,25]
++for tmax,lab in ((1e4,'full window'),(8000,'t<=8 kyr (c2)')):
++    E=[errs(ref,f'{pre}{dt}',tmax) for dt in dts]
++    print(f"--- {pre}*  {lab}")
++    for key in ('jco','co','all'):
++        v=[e[key] for e in E]; p=[np.log(v[i]/v[i+1])/np.log(dts[i]/dts[i+1]) for i in range(len(v)-1)]
++        print(f"  {key:4s} err: "+" ".join(f"{x:.1e}" for x in v)+"   local order: "+" ".join(f"{x:4.2f}" for x in p))
+diff --git a/tests/phase3_split/topbin.py b/tests/phase3_split/topbin.py
+new file mode 100644
+index 0000000..2a335ed
+--- /dev/null
++++ b/tests/phase3_split/topbin.py
+@@ -0,0 +1,18 @@
++"""Item 4: top-bin ice sweep-up -- CO-ice share & monolayers per bin over time (reference), and the
++per-bin CO-ice error profile of a split run (which bins carry the headline error)."""
++import sys, numpy as np, compare as C
++ref, run = sys.argv[1], sys.argv[2]
++n,T,Y = C.read(ref); ns,Ts,Ys = C.read(run); ng=20
++rows=[l.split() for l in open(ref+'/dust_grid_table.in') if l.strip() and not l.startswith('!')]
++a=np.array([float(r[0]) for r in rows]); sites=4*np.pi*a**2*8e14
++jco=[n.index('J%02dCO'%k) for k in range(1,ng+1)]
++gr=[(n.index('GRAIN%02d'%k),n.index('GRAIN%02d-'%k)) for k in range(1,ng+1)]
++Jall=[[i for i,s in enumerate(n) if s.startswith('J%02d'%k)] for k in range(1,ng+1)]
++print("t[yr]  CO-ice share bins18-20  | monolayers bins 1,4,8,12,16,20 | split rel.err of JkCO, bins 1..20 (x1e-3)")
++for i,t in enumerate(T):
++    if t<=0: continue
++    y=Y[i]; ys=Ys[np.argmin(abs(Ts-t))]
++    co=y[jco]; share=co[17:].sum()/co.sum()
++    ngr=np.array([y[g0]+y[g1] for g0,g1 in gr]); ml=np.array([y[Jall[k]].sum() for k in range(ng)])/(ngr*sites)
++    err=np.abs(ys[jco]-co)/co
++    print(f"{t:6.0f}  {share:6.3f}   | "+" ".join(f"{ml[k]:6.1f}" for k in (0,3,7,11,15,19))+" | "+" ".join(f"{1e3*e:4.1f}" for e in err))
+-- 
+2.43.0
+
