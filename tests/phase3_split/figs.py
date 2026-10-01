@@ -15,9 +15,9 @@ for a in ax:
     x=np.array([10,1000]); a.loglog(x,1e-3*(x/100)**1,'k:',lw=.8,label='slope 1'); a.loglog(x,1e-4*(x/100)**2,'k-.',lw=.8,label='slope 2')
     a.axvspan(100,1000,color='0.9',zorder=0); a.axvline(1000,color='0.5',lw=.8)
     a.axhline(1e-4,color='r',lw=.6); a.set_xlabel(r'$\Delta t_{\rm split}$ [yr]'); a.grid(alpha=.3,which='both')
-ax[0].set_ylabel('max relative error vs coupled (over comparison times)'); ax[0].legend(fontsize=7); ax[1].legend(fontsize=7)
+ax[0].set_ylabel('max relative error vs coupled (rtol 1e-8)'); ax[0].legend(fontsize=7); ax[1].legend(fontsize=7)
 ax[0].set_title('per-bin CO ice (max over bins)'); ax[1].set_title('gas-phase CO')
-plt.tight_layout(); plt.savefig('fig_accuracy.png',dpi=130)
+fig.suptitle(r'$T_{\rm gas}=21.23$ K, $n_{\rm H}=2.2\times10^8$, $T_d$ 25$\to$13 K',fontsize=9); plt.tight_layout(); plt.savefig('fig_accuracy.png',dpi=130)
 # ---- work-precision: error (vs rtol 1e-10 reference) vs cost
 fig,ax=plt.subplots(1,2,figsize=(11,4.3))
 for key,lab in (('nfe','RHS evaluations'),('nlu','sparse LU decompositions')):
@@ -29,5 +29,5 @@ for key,lab in (('nfe','RHS evaluations'),('nlu','sparse LU decompositions')):
         for rt,m in ((1e-4,'^'),(1e-6,'v'),(1e-8,'o')):
             ss=sorted([r for r in W if r['variant']==v and r['order']=='CDC' and abs(fl(r,'rtol')/rt-1)<1e-6],key=lambda r:-fl(r,'dt_yr'))
             if ss: a.loglog([fl(r,key) for r in ss],[fl(r,'max_jco') for r in ss],color=c,marker=m,ls='-',lw=.8,label=f'split {v} CDC, rtol {rt:.0e}')
-    a.set_xlabel(lab); a.set_ylabel('per-bin CO ice: max rel. error vs rtol-1e-10 coupled'); a.grid(alpha=.3,which='both')
-ax[0].legend(fontsize=6); plt.tight_layout(); plt.savefig('fig_workprecision.png',dpi=130)
+    a.set_xlabel(lab); a.set_ylabel('per-bin CO ice: max rel. error vs coupled (rtol 1e-10)')
+ax[0].legend(fontsize=6); fig.suptitle(r'$T_{\rm gas}=21.23$ K, $n_{\rm H}=2.2\times10^8$, $T_d$ 25$\to$13 K',fontsize=9); plt.tight_layout(); plt.savefig('fig_workprecision.png',dpi=130)
