@@ -9,8 +9,12 @@ gas evolution removed, dust radial advection off, pure sticking, and the
 collision kernel overridden to the prescribed constant / additive form.
 
 Two deliberate departures from DustPy's own test, both to match NEMO / raise rigor:
-  * IC = the SAME exponential n(m,0) NEMO uses (coag_analytic.exp_ic_bins), placed
-    in cell [1] -- not DustPy's monodisperse start.
+  * IC = the exponential n(m,0) SAMPLED AT THE GRID MASSES -- the number density
+    dN/dm|_{m_k} times the bin width -- placed in cell [1], not DustPy's monodisperse
+    start. NEMO is given the SAME point-sampled IC in the comparison
+    (compare_dustpy.nemo_curves calls _run_nemo(..., ic="point")), so both codes solve
+    the same discrete problem. NOTE: this is NOT coag_analytic.exp_ic_bins (the exact
+    bin integral); that bin-integrated IC is used only for the Part B convergence study.
   * validated against the EXACT Golovin / constant analytic (coag_analytic.py),
     not DustPy's Bessel-free large-mass asymptotic.
 

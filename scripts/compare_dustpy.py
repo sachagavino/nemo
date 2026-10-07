@@ -42,12 +42,20 @@ def nemo_curves(kernel, a_min, a_max, ratio, rho, m0, N0, K0, nH, times):
     nmgc = os.path.join(ROOT, "bin", "nmgc")
     prefac = K0 if kernel == "constant" else K0 / m0
     R_eff = K0 * nH * N0
+    # Part C: give NEMO the SAME point-sampled IC DustPy uses, so both codes solve
+    # the identical discrete problem and the point-sampled exact is the consistent
+    # reference for both (see coag_validation_harness_fix A2).
     out = CD._run_nemo(nmgc, kernel, ratio, a_min, a_max, rho, N0, m0, prefac, nH,
-                       stop_time_yr=(3.0 * max(times) / R_eff) / YR, nb_outputs=40)
+                       stop_time_yr=(3.0 * max(times) / R_eff) / YR, nb_outputs=40,
+                       ic="point")
     h = np.diff(CD._bin_edges(out["mass"]))
     curves = {}
     for T in times:
-        t_s = T / (prefac * nH * (out["N0"] if kernel == "constant" else out["M1"]))
+        # physical N0 (constant) / N0*m0 (additive) for the time mapping -- NOT the
+        # grid sums out["N0"]/out["M1"], which miss the ~9% of number below the
+        # bottom bin edge and bias the mapping ~9% low (coag_diffusion B1).
+        amp = N0 if kernel == "constant" else N0 * m0
+        t_s = T / (prefac * nH * amp)
         n_k = CD._interp_n(out["times"], out["n_of_t"], t_s / YR)
         curves[T] = out["mass"]**2 * n_k / h        # N m^2
     return out["mass"], curves

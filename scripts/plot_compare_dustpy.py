@@ -27,7 +27,7 @@ from collections import defaultdict
 
 import numpy as np
 import matplotlib
-# matplotlib.use("Agg")
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -69,9 +69,12 @@ def figure_l1(datadir, ext):
     ax.legend(fontsize=11, frameon=False)
     #ax.grid(True, alpha=0.3)
     
-    out = os.path.join(ROOT, "figures", f"coag_dustpy_l1.{ext}")
-    fig.tight_layout(); #fig.savefig(out, dpi=150); plt.close(fig)
-    print(f"wrote {out}")
+    fig.tight_layout()
+    base = os.path.join(ROOT, "figures", "coag_dustpy_l1")
+    for e in ("png", "pdf"):
+        fig.savefig(f"{base}.{e}", dpi=150)
+    plt.close(fig)
+    print(f"wrote {base}.png / {base}.pdf")
 
 
 def figure_overlay(datadir, ext, times=(0.5, 1.0, 2.0)):
@@ -79,13 +82,14 @@ def figure_overlay(datadir, ext, times=(0.5, 1.0, 2.0)):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
     for ax, kernel in zip(axes, KERNELS):
         data = load(datadir, kernel)
+        sym = "T" if kernel == "constant" else r"\tau"
         ymax = 0.0
         for t in times:
             if t not in data:
                 continue
             m, n, d, e = data[t]
             c = TAU_COLORS.get(t, "#333333")
-            ax.loglog(m, e, "-", color=c, lw=1.5, label=fr"exact ${"T"}={t:g}$")
+            ax.loglog(m, e, "-", color=c, lw=1.5, label=fr"exact ${sym}={t:g}$")
             ax.loglog(m, n, "o", color=c, ms=5, mfc="none")
             ax.loglog(m, d, "x", color=c, ms=5)
             ymax = max(ymax, e.max())
@@ -102,10 +106,12 @@ def figure_overlay(datadir, ext, times=(0.5, 1.0, 2.0)):
     axes[0].tick_params(labelsize=13)
     axes[1].tick_params(labelsize=13)
     #fig.suptitle("NEMO vs DustPy: same 0D coagulation problem, two independent codes")
-    out = os.path.join(ROOT, "figures", f"coag_nemo_vs_dustpy.{ext}")
-    fig.tight_layout(); #fig.savefig(out, dpi=150); plt.close(fig)
-    plt.show()
-    print(f"wrote {out}")
+    fig.tight_layout()
+    base = os.path.join(ROOT, "figures", "coag_nemo_vs_dustpy")
+    for e in ("png", "pdf"):
+        fig.savefig(f"{base}.{e}", dpi=150)
+    plt.close(fig)
+    print(f"wrote {base}.png / {base}.pdf")
 
 
 def main():
