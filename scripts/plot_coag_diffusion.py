@@ -23,7 +23,7 @@ from collections import defaultdict
 
 import numpy as np
 import matplotlib
-#matplotlib.use("Agg")
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 TAU_COLORS = {0.5: "#1b9e77", 1.0: "#d95f02", 2.0: "#7570b3"}
@@ -99,36 +99,46 @@ def plot(datadir, ext):
     axA.set_ylim(gmax * 1e-6, gmax * 3)                       # clip the noise tail
 
     # ---------- Panel B ----------
+    # Convergence of the CELL-AVERAGE error -- bin contents vs the exact solution
+    # integrated over the same bins. This is zero for the exact IC by construction, so
+    # it isolates the coagulation operator (unlike cont_L1, which carries the
+    # piecewise-constant reconstruction floor; cont_L1 and its t=0 floor are quoted in
+    # the text, not plotted here). Mass-weighted (solid) is the conservation-law norm;
+    # area-weighted a^2 (dashed) is what the chemistry sees through the grain surface.
     by_kernel = defaultdict(list)
     for r in pb:
-        by_kernel[r["kernel"]].append((int(r["nbins"]), float(r["cont_L1"]),
-                                       float(r["disc_L1"]),
-                                       float(r.get("a2_cont_L1", "nan"))))
+        by_kernel[r["kernel"]].append((int(r["nbins"]),
+                                       float(r["cellL1_mass"]),
+                                       float(r["cellL1_area"])))
     kstyle = {"constant": ("s", "#1f77b4"), "additive": ("^", "#2ca02c")}
     nb_all = []
+    anchor = None
     for kernel, rows in by_kernel.items():
         rows = np.array(sorted(rows))
         mk, col = kstyle[kernel]
-        axB.loglog(rows[:, 0], rows[:, 1], mk + "-", color=col, label=f"{kernel} cont-L1 (mass-w)")
-        axB.loglog(rows[:, 0], rows[:, 3], mk + "-.", color=col, mfc="none",
-                   label=f"{kernel} cont-L1 (area-w, $a^2$)")
-        axB.loglog(rows[:, 0], rows[:, 2], mk + ":", color=col, alpha=0.5,
-                   label=f"{kernel} disc-L1 (diag.)")
+        axB.loglog(rows[:, 0], rows[:, 1], mk + "-", color=col,
+                   label=f"{kernel} cell-avg L1 (mass-w)")
+        axB.loglog(rows[:, 0], rows[:, 2], mk + "--", color=col, mfc="none",
+                   label=f"{kernel} cell-avg L1 (area-w, $a^2$)")
         nb_all += list(rows[:, 0])
-        e0, nb0 = rows[0, 1], rows[0, 0]
+        if anchor is None:
+            anchor = (rows[0, 0], rows[0, 1])     # (nb0, e0) from the coarsest grid
     nb_ref = np.array(sorted(set(nb_all)), float)
-    axB.loglog(nb_ref, e0 * (nb_ref / nb0)**-1.0, ":", color="0.5",
-               label="slope −1 (first-order k=0)")
+    nb0, e0 = anchor
+    axB.loglog(nb_ref, e0 * (nb_ref / nb0)**-1.0, ":", color="0.55",
+               label="slope −1")
+    axB.loglog(nb_ref, e0 * (nb_ref / nb0)**-2.0, ":", color="0.8",
+               label="slope −2")
     axB.set_xlabel("number of bins")
-    axB.set_ylabel("relative L1 error on g")
-    axB.set_title("Convergence at evolved time (T=2 const, τ=1 add)")
+    axB.set_ylabel("relative cell-average L1 error")
+    axB.set_title("Operator convergence at evolved time (T=2 const, τ=1 add)")
     axB.legend(fontsize=8, frameon=False)
 
     fig.tight_layout()
-    out = os.path.join(os.path.dirname(datadir) or ".", f"coag_diffusion.{ext}")
-    #fig.savefig(out, dpi=150)
-    plt.show()
-    print(f"wrote {out}")
+    base = os.path.join(os.path.dirname(datadir) or ".", "coag_diffusion")
+    for e in ("png", "pdf"):
+        fig.savefig(f"{base}.{e}", dpi=150)
+    print(f"wrote {base}.png / {base}.pdf")
 
 
 def main():

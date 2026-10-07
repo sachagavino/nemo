@@ -74,10 +74,22 @@ def _read_distribution(path):
 
 
 def _run_nemo(nmgc, kernel, ratio, a_min, a_max, rho, N0, m0, K0, nH,
-              stop_time_yr, nb_outputs):
-    """Generate tabulated grid+IC for this ratio, run pure coag, return outputs."""
+              stop_time_yr, nb_outputs, ic="bin"):
+    """Generate tabulated grid+IC for this ratio, run pure coag, return outputs.
+
+    ic="bin"   : exact bin integrals of the exponential (coag_analytic.exp_ic_bins);
+                 the finite-volume-consistent IC used for the Part B convergence study.
+    ic="point" : exponential number density sampled at the grid mass m_k, times the
+                 bin width (i.e. dN/dm|_{m_k} * h_k) -- DustPy's convention. Used in
+                 the Part C comparison so NEMO and DustPy solve the SAME discrete
+                 problem (see compare_dustpy.nemo_curves)."""
     radii, masses, nb = CA.build_grid(a_min, a_max, ratio, rho)
-    n_k = CA.exp_ic_bins(masses, N0, m0)
+    if ic == "bin":
+        n_k = CA.exp_ic_bins(masses, N0, m0)
+    elif ic == "point":
+        n_k = (N0 / m0) * np.exp(-masses / m0) * np.diff(_bin_edges(masses))
+    else:
+        raise ValueError(f"unknown ic={ic!r} (expected 'bin' or 'point')")
     run = tempfile.mkdtemp(prefix=f"coagdiff_{kernel}_{ratio}_")
     shutil.copy(os.path.join(FIXDIR, "dust_grid_table.in"), run) if False else None
     for fn in os.listdir(FIXDIR):
@@ -171,6 +183,26 @@ def _errors(mass, n_k, kernel, dimless_t, N0, m0):
     return dict(cL1=ec1 / ec1_ref, dL1=ed1 / ed1_ref, aL1=ea1 / ea1_ref)
 
 
+def _cell_errors(mass, n_k, kernel, dimless_t, N0, m0):
+    """Relative L1 of the BIN CONTENTS n_k against the exact solution integrated over
+    the SAME (geometric-mean) bins. For the exact IC this is zero by construction, so
+    unlike cont_L1 (which carries the piecewise-constant reconstruction floor) it
+    isolates the error of the coagulation operator itself. Returned for three weights:
+    mass (m), surface area (m^2/3, what the chemistry sees), and number (1)."""
+    e = _bin_edges(mass)
+    xg, wg = leggauss(32)
+    na = np.array([0.5 * (e[j + 1] - e[j]) * np.sum(
+                       wg * (N0 / m0) * _f_dim(
+                           kernel,
+                           (0.5 * (e[j + 1] - e[j]) * xg + 0.5 * (e[j + 1] + e[j])) / m0,
+                           dimless_t))
+                   for j in range(mass.size)])
+    L = lambda w: np.sum(w * np.abs(n_k - na)) / np.sum(w * na)
+    return dict(cellL1_mass=L(mass),
+                cellL1_area=L(mass**(2.0 / 3.0)),
+                cellL1_number=L(np.ones_like(mass)))
+
+
 def sweep(nmgc, kernel, ratios, dimless_t, a_min, a_max, rho, dtg, m0_radius, K0, nH):
     m0 = CA.mass_of_radius(m0_radius, rho)
     N0 = dtg * 1.4 * AMU / m0                 # fixed physical IC across the sweep
@@ -188,12 +220,13 @@ def sweep(nmgc, kernel, ratios, dimless_t, a_min, a_max, rho, dtg, m0_radius, K0
         t_end_s = 3.0 * dimless_t / R_eff      # comfortably past the target time
         out = _run_nemo(nmgc, kernel, ratio, a_min, a_max, rho, N0, m0, prefac, nH,
                         stop_time_yr=t_end_s / YR, nb_outputs=40)
-        if kernel == "constant":
-            t_target_s = dimless_t / (prefac * nH * out["N0"])
-        else:
-            t_target_s = dimless_t / (prefac * nH * out["M1"])   # tau = B nH M1 t
+        # physical N0 (constant) / N0*m0 (additive) for both the time mapping and the
+        # analytic amplitude -- NOT the grid sums out["N0"]/out["M1"], which miss the
+        # ~9% of number below the bottom bin edge and bias the reference ~9% low (B-i).
+        amp = N0 if kernel == "constant" else N0 * m0
+        t_target_s = dimless_t / (prefac * nH * amp)
         n_k = _interp_n(out["times"], out["n_of_t"], t_target_s / YR)
-        e = _errors(out["mass"], n_k, kernel, dimless_t, out["N0"], m0)
+        e = _errors(out["mass"], n_k, kernel, dimless_t, N0, m0)
         results.append((ratio, out["nb"], e))
         print(f"   {ratio:6.2f} {out['nb']:6d} {e['cL1']:11.4e} {e['aL1']:11.4e} "
               f"{e['dL1']:11.4e}", flush=True)
@@ -247,13 +280,11 @@ def bounded_report(nmgc, kernel, ratio, dimless_end, a_min, a_max, rho, dtg,
     print(f"   {'dimless_t':>10} {'cont-L1':>11}")
     errs = []
     for t_yr, n_k in zip(out["times"], out["n_of_t"]):
-        if kernel == "constant":
-            dt = prefac * nH * out["N0"] * (t_yr * YR)
-        else:
-            dt = prefac * nH * out["M1"] * (t_yr * YR)
+        amp = N0 if kernel == "constant" else N0 * m0   # physical, not grid sum (B-i)
+        dt = prefac * nH * amp * (t_yr * YR)
         if dt < 0.05:
             continue
-        e = _errors(out["mass"], n_k, kernel, dt, out["N0"], m0)["cL1"]
+        e = _errors(out["mass"], n_k, kernel, dt, N0, m0)["cL1"]
         errs.append((dt, e))
     for dt, e in errs[:: max(1, len(errs) // 8)]:
         print(f"   {dt:10.3f} {e:11.4e}")
@@ -289,7 +320,7 @@ def dump_figure_data(nmgc, ratios, a_min, a_max, rho, dtg, m0_radius, K0, nH, ou
                             stop_time_yr=(3.0 / R_eff) / YR, nb_outputs=60)
             edges = _bin_edges(out["mass"]); h = np.diff(edges)
             for tau in taus:
-                t_yr = tau / (prefac * nH * out["M1"]) / YR
+                t_yr = tau / (prefac * nH * (N0 * m0)) / YR   # physical N0*m0 (B-i)
                 n_k = _interp_n(out["times"], out["n_of_t"], t_yr)
                 g_num = out["mass"] * (n_k / h)
                 for mk, gk in zip(out["mass"], g_num):
@@ -308,7 +339,8 @@ def dump_figure_data(nmgc, ratios, a_min, a_max, rho, dtg, m0_radius, K0, nH, ou
     # so weighted re-analyses (e.g. the a^2 surface-area check, or future weights) are
     # pure post-processing with NO NEMO re-run.
     fB = open(os.path.join(outdir, "panelB.tsv"), "w")
-    fB.write("kernel\tmass_ratio\tnbins\tcont_L1\ta2_cont_L1\tdisc_L1\n")
+    fB.write("kernel\tmass_ratio\tnbins\tcont_L1\ta2_cont_L1\tdisc_L1\t"
+             "cont_L1_t0\tcellL1_mass\tcellL1_area\tcellL1_number\n")
     fD = open(os.path.join(outdir, "panelB_distributions.tsv"), "w")
     fD.write("# number distribution n_k [/H] at the evolved time (T=2 const, tau=1 add),\n"
              "# per kernel and resolution -- for weighted re-analysis without re-running NEMO.\n")
@@ -316,12 +348,25 @@ def dump_figure_data(nmgc, ratios, a_min, a_max, rho, dtg, m0_radius, K0, nH, ou
     for kernel, dim_t in (("constant", 2.0), ("additive", 1.0)):
         pf = K0 if kernel == "constant" else K0 / m0
         for ratio in ratios:
+            # nb_outputs=120 (not 40): the cell-average error at the finest grids is a
+            # tiny tail quantity; coarse output-time sampling over the 3x window makes
+            # the linear-in-time interpolation overestimate it (~20% at ratio 1.15).
+            # 120 snapshots bracket the target time tightly and the value converges
+            # (ratio 1.15 additive: 0.017->0.014 mass, 0.011->0.009 area). cont_L1 is
+            # reconstruction-dominated and time-insensitive, so it is unchanged.
             o = _run_nemo(nmgc, kernel, ratio, a_min, a_max, rho, N0, m0, pf, nH,
-                          stop_time_yr=(3.0 * dim_t / R_eff) / YR, nb_outputs=40)
-            tt = dim_t / (pf * nH * (o["N0"] if kernel == "constant" else o["M1"]))
+                          stop_time_yr=(3.0 * dim_t / R_eff) / YR, nb_outputs=120)
+            amp = N0 if kernel == "constant" else N0 * m0     # physical, not grid sum (B-i)
+            tt = dim_t / (pf * nH * amp)
             nk = _interp_n(o["times"], o["n_of_t"], tt / YR)
-            e = _errors(o["mass"], nk, kernel, dim_t, o["N0"], m0)
-            fB.write(f"{kernel}\t{ratio}\t{o['nb']}\t{e['cL1']:.6e}\t{e['aL1']:.6e}\t{e['dL1']:.6e}\n")
+            e = _errors(o["mass"], nk, kernel, dim_t, N0, m0)
+            # reconstruction floor: the SAME cont_L1 norm on the exact bin IC at t=0
+            floor = _errors(o["mass"], CA.exp_ic_bins(o["mass"], N0, m0),
+                            kernel, 0.0, N0, m0)["cL1"]
+            ce = _cell_errors(o["mass"], nk, kernel, dim_t, N0, m0)
+            fB.write(f"{kernel}\t{ratio}\t{o['nb']}\t{e['cL1']:.6e}\t{e['aL1']:.6e}\t"
+                     f"{e['dL1']:.6e}\t{floor:.6e}\t{ce['cellL1_mass']:.6e}\t"
+                     f"{ce['cellL1_area']:.6e}\t{ce['cellL1_number']:.6e}\n")
             for mk, nkk in zip(o["mass"], nk):
                 fD.write(f"{kernel}\t{ratio}\t{o['nb']}\t{mk:.6e}\t{nkk:.6e}\n")
     fB.close(); fD.close()
