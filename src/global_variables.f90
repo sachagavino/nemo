@@ -17,6 +17,13 @@ implicit none
 !Integer parameter to define number of grains to be used in simulation.
 ! integer, parameter     :: nb_grains=1
 integer                  :: nb_grains
+!> Hard cap on nb_grains. Grain/ice species-name indices are written with a
+!! 2-digit format (I2.2) into a character(2) buffer in input_output.f90 and
+!! gasgrain.f90; an index >= 100 overflows the field to '**', so bins 100+ collapse
+!! onto duplicate names ('GRAIN**') and coagulation products are silently routed to
+!! the wrong bin (mass non-conservation). Until the name builders AND parsers are
+!! widened to 3 digits (v2), init must refuse any grid with more than this many bins.
+integer, parameter       :: MAX_GRAINS_NAMEFMT = 99
 real(double_precision),allocatable, dimension(:):: grain_radii,grain_temp
 !> Dust size grid (stage 3). radius_grid is an alias kept for clarity in the
 !! dust code; grain_radii remains the canonical array the chemistry consumes.

@@ -77,6 +77,16 @@ subroutine dust_grid_count_bins()
   nb_grains = int(dlog(m_max/m_min) / dlog(mass_ratio)) + 1
   if (nb_grains.lt.1) nb_grains = 1
 
+  if (nb_grains.gt.MAX_GRAINS_NAMEFMT) then
+    write(error_unit,*) 'Error (dust_grid, derived): grid has ', nb_grains, &
+      ' bins, exceeding the hard limit of ', MAX_GRAINS_NAMEFMT, '.'
+    write(error_unit,*) 'Species-name indices use a 2-digit format (I2.2); bins >= 100', &
+      ' overflow to GRAIN** and silently corrupt the grid (mass non-conservation).'
+    write(error_unit,*) 'Use a coarser grid: larger mass_ratio, or a narrower a_min..a_max.', &
+      ' (3-digit names are a v2 task.)'
+    call exit(31)
+  endif
+
   return
 end subroutine dust_grid_count_bins
 

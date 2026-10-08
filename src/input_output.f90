@@ -552,6 +552,15 @@ else if (dust_grid_source.eq.'tabulated') then
   endif
   call get_linenumber(filename, nb_lines)
   nb_grains = nb_lines
+  if (nb_grains.gt.MAX_GRAINS_NAMEFMT) then
+    write(Error_unit,*) 'Error (dust_grid, tabulated): ', trim(filename), ' has ', &
+      nb_grains, ' rows, exceeding the hard limit of ', MAX_GRAINS_NAMEFMT, '.'
+    write(Error_unit,*) 'Species-name indices use a 2-digit format (I2.2); bins >= 100', &
+      ' overflow to GRAIN** and silently corrupt the grid (mass non-conservation).'
+    write(Error_unit,*) 'Provide at most ', MAX_GRAINS_NAMEFMT, ' rows.', &
+      ' (3-digit names are a v2 task.)'
+    call exit(22)
+  endif
 else
   write(Error_unit,*) 'Error: dust_grid_source = "', trim(dust_grid_source), &
                       '" unknown. Use derived or tabulated.'
