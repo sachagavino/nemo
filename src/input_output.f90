@@ -486,6 +486,10 @@ use global_variables
   write(10, '(a)') '! linear: Output times are linearly spaced'
   write(10, '(a)') '! log   : Outputs times are log-spaced'
   write(10,'(a,es24.16e3, a)') 'relative_tolerance = ',RELATIVE_TOLERANCE, ' ! Relative tolerance of the solver'
+  write(10,'(a,i0,a)') 'charging_focusing = ', charging_focusing, &
+    ' ! 0: geometric type-0 charging rates (default, bit-identical); 1: Draine-Sutin Coulomb/image focusing'
+  write(10,'(a,es24.16e3,a)') 'electron_sticking = ', electron_sticking, &
+    ' ! electron sticking coefficient, applied to e- attachment only when charging_focusing = 1'
   write(10,'(a,es24.16e3,a)') 'minimum_initial_abundance = ', MINIMUM_INITIAL_ABUNDANCE, ' ! default minimum initial &
                              &fraction abundance'
   write(10,'(a,es24.16e3,a)') 'grain_abundance_floor = ', grain_abundance_floor, ' ! [grains/cm^3] floor on the grain &
@@ -816,8 +820,14 @@ if (isDefined) then
       ! Solver
       case('relative_tolerance', 'RTOL') ! The old name is kept for compatibility reasons
         read(value, *) RELATIVE_TOLERANCE
-      
-      !Switches      
+
+      ! Grain-charging Coulomb/image focusing (Draine & Sutin 1987); default off = bit-identical.
+      case('charging_focusing')
+        read(value, *) charging_focusing
+      case('electron_sticking')
+        read(value, *) electron_sticking
+
+      !Switches
       case('is_3_phase')
         read(value, *) is_3_phase
 

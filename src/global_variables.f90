@@ -271,6 +271,14 @@ real(double_precision), allocatable, dimension(:) :: ACC_RATES_PREFACTOR !< dim(
 real(double_precision), allocatable, dimension(:) :: TUNNELING_RATE_TYPE_1 !< dim(nb_species) Quantum tunneling diffusion rate [s-1] (Watson 1976) (dEB.BOLTZ) / (4.HBAR.nb_sites_per_grain)
 real(double_precision), allocatable, dimension(:) :: TUNNELING_RATE_TYPE_2 !< dim(nb_species) Quantum tunneling diffusion rate [s-1] (Hasegawa & Herbst 1992) VIBRATION_FREQUENCY / nb_sites_per_grain.EXP(-2.DIFFUSION_BARRIER_THICKNESS / HBAR.(2.AMU.SMA.BOLTZ.EB)^1/2)
 integer, allocatable, dimension(:) :: SPECIES_CHARGE !< dim(nb_species) !< electric charge [in e-] for each species, 0 if neutral, positive or negative if ions.
+!> Grain-charging Coulomb/image focusing switch (Draine & Sutin 1987). Default 0 keeps
+!! the purely geometric type-0 charging rates bit for bit. 1 multiplies each type-0 rate
+!! by the per-bin focusing factor (see set_constant_rates). This is a measurement switch
+!! for sec:charge; it changes no physics default.
+integer :: charging_focusing = 0
+!> Electron sticking coefficient, applied to the electron-attachment rate ONLY when
+!! charging_focusing = 1 (the current A value already corresponds to sticking 1). Default 1.0.
+real(double_precision) :: electron_sticking = 1.0d0
 
 ! Arrays about reactions
 character(len=11), allocatable, dimension(:,:) :: REACTION_COMPOUNDS_NAMES !< dim(MAX_COMPOUNDS,nb_reactions). Empty string means no species

@@ -1032,14 +1032,19 @@ end subroutine get_temporal_derivatives
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
   subroutine set_constant_rates()
 
-  use global_variables 
-  
+  use global_variables
+  use iso_fortran_env, only: error_unit
+
   implicit none
 
   ! Locals
   real(double_precision) :: T300, TI, TSQ
   integer :: nsta, nfin
   integer :: i,k, j, w, m, n, ic_i
+  ! --- grain-charging Coulomb/image focusing (Draine & Sutin 1987) ---
+  real(double_precision), parameter :: E_ESU2 = 4.80320471d-10 * 4.80320471d-10  ! e^2 [esu^2, cgs]
+  real(double_precision) :: tau_k, focus_factor
+  integer :: ipart
   integer, dimension(10) :: indice
   real(double_precision), dimension(10) :: distmin, distmax
   real(double_precision) :: activ,grain_radius_factor
@@ -1070,7 +1075,32 @@ end subroutine get_temporal_derivatives
   do J=type_id_start(0),type_id_stop(0)
     grain_radius_factor = grain_radii(GRAIN_RANK(J))*grain_radii(GRAIN_RANK(J)) / (1.E-5*1.E-5)
     reaction_rates(J)  = grain_radius_factor * RATE_A(J) * (T300**RATE_B(J))
-    
+
+    ! Coulomb/image focusing of the geometric charging rate (Draine & Sutin 1987),
+    ! singly-charged projectiles only. Default off -> rates unchanged bit for bit.
+    if (charging_focusing.eq.1) then
+      ! reduced temperature of this grain bin: tau = a_k k_B T_gas / e^2
+      tau_k = grain_radii(GRAIN_RANK(J)) * K_B * actual_gas_temp / E_ESU2
+      ! the projectile is the non-grain reactant: e- (INDEL) or a singly-charged cation
+      if (reactant_1_idx(J).eq.INDEL .or. SPECIES_CHARGE(reactant_1_idx(J)).eq.1) then
+        ipart = reactant_1_idx(J)
+      else
+        ipart = reactant_2_idx(J)
+      endif
+      if (ipart.eq.INDEL) then
+        ! electron onto a neutral grain: factor = s_e * (1 + sqrt(pi/(2 tau)))
+        focus_factor = electron_sticking * (1.d0 + sqrt(PI / (2.d0*tau_k)))
+      else if (SPECIES_CHARGE(ipart).eq.1) then
+        ! singly-charged cation onto a negative grain: (1 + 1/tau)(1 + sqrt(2/(tau+2)))
+        focus_factor = (1.d0 + 1.d0/tau_k) * (1.d0 + sqrt(2.d0/(tau_k + 2.d0)))
+      else
+        write(error_unit,*) 'FATAL (set_constant_rates): charging_focusing = 1 but type-0 reaction ', J, &
+          ' is neither (neutral grain + e-) nor (negative grain + singly-charged cation).'
+        call exit(32)
+      endif
+      reaction_rates(J) = reaction_rates(J) * focus_factor
+    endif
+
 !     write(*,*)reaction_rates(J), grain_radii(GRAIN_RANK(J)),GRAIN_RANK(J) ,j
   enddo
   
