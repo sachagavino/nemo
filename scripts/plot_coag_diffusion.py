@@ -95,7 +95,7 @@ def plot(datadir, ext):
     axA.legend(handles=res_handles, loc="upper right", fontsize=8, frameon=False)
     axA.set_xlabel("grain mass m [g]")
     axA.set_ylabel(r"mass density $g = x\,f$  [g / H]")
-    axA.set_title("Additive kernel: over-diffusion shrinks with resolution")
+    #axA.set_title("Additive kernel: over-diffusion shrinks with resolution")
     axA.set_ylim(gmax * 1e-6, gmax * 3)                       # clip the noise tail
 
     # ---------- Panel B ----------
@@ -131,7 +131,7 @@ def plot(datadir, ext):
                label="slope −2")
     axB.set_xlabel("number of bins")
     axB.set_ylabel("relative cell-average L1 error")
-    axB.set_title("Operator convergence at evolved time (T=2 const, τ=1 add)")
+    #axB.set_title("Operator convergence at evolved time (T=2 const, τ=1 add)")
     axB.legend(fontsize=8, frameon=False)
 
     fig.tight_layout()

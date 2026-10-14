@@ -95,7 +95,7 @@ def figure_overlay(datadir, ext, times=(0.5, 1.0, 2.0)):
             ymax = max(ymax, e.max())
         ax.set_xlabel("grain mass m [g]", fontsize=13)
         ax.set_ylabel(r"normalised $N\,m^2$", fontsize=13)
-        ax.set_title(f"{kernel} kernel")
+        #ax.set_title(f"{kernel} kernel")
         ax.set_ylim(ymax * 1e-5, ymax * 3)
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], color="0.3", lw=1.5, label="exact analytic"),
