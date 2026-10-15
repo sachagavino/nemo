@@ -1,0 +1,201 @@
+From 4479675b995ae62ecba750db6d166da560c2b279 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 16:41:51 +0200
+Subject: [PATCH] dust_grid: hard guard against > 99 bins (two-digit
+ species-name overflow)
+
+Grain/ice species-name indices are written with a 2-digit format (I2.2) into a
+character(2) buffer (input_output.f90 YGRAIN/YGRAIN_MINUS at ~652 and the ice/gas
+name builders; gasgrain.f90). An index >= 100 overflows the field to '**', so bins
+100+ collapse onto duplicate names ('GRAIN**') and coagulation products are silently
+routed to the wrong bin. This is the cause of the x2.37 mass gain previously seen on
+the 149-bin grid (diagnosed in partBC_followup.md): not the coagulation scheme and
+not the solver (gain is identical at rtol 1e-4 and 1e-7), and it switches on exactly
+when the tail first reaches bin 100.
+
+v1 fix = refuse such grids at init, on both paths:
+- new parameter MAX_GRAINS_NAMEFMT = 99 (global_variables.f90), documented.
+- dust_grid_count_bins (derived path): stop (exit 31) if nb_grains > 99.
+- input_output tabulated path: stop (exit 22) if the table has > 99 rows.
+Both print an explicit message naming the cause and the remedy (coarser grid now;
+3-digit names are a v2 task, since every name builder AND parser must change
+together -- input_output.f90 read(...,'(I2)') at 1520/1526/1580 and the J01CO ice
+names also assume two digits).
+
+Test: tests/grain_count_guard.sh asserts (A) derived >99 and (B) tabulated >99 both
+fail at init with the guard message, and (C) a <=99 grid is still accepted. All pass.
+
+Impact on results: none. All fiducial and validation runs use <= 99 bins (the Part B
+sweep tops out at exactly 99 at ratio 1.15). The paper will state the limit.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MZiMaHQmctaoPSEVjYonWi
+---
+ src/dust/dust_grid.f90     | 10 ++++
+ src/global_variables.f90   |  7 +++
+ src/input_output.f90       |  9 ++++
+ tests/grain_count_guard.sh | 93 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 119 insertions(+)
+ create mode 100755 tests/grain_count_guard.sh
+
+diff --git a/src/dust/dust_grid.f90 b/src/dust/dust_grid.f90
+index 0cb2ee1..b6c7a53 100644
+--- a/src/dust/dust_grid.f90
++++ b/src/dust/dust_grid.f90
+@@ -77,6 +77,16 @@ subroutine dust_grid_count_bins()
+   nb_grains = int(dlog(m_max/m_min) / dlog(mass_ratio)) + 1
+   if (nb_grains.lt.1) nb_grains = 1
+ 
++  if (nb_grains.gt.MAX_GRAINS_NAMEFMT) then
++    write(error_unit,*) 'Error (dust_grid, derived): grid has ', nb_grains, &
++      ' bins, exceeding the hard limit of ', MAX_GRAINS_NAMEFMT, '.'
++    write(error_unit,*) 'Species-name indices use a 2-digit format (I2.2); bins >= 100', &
++      ' overflow to GRAIN** and silently corrupt the grid (mass non-conservation).'
++    write(error_unit,*) 'Use a coarser grid: larger mass_ratio, or a narrower a_min..a_max.', &
++      ' (3-digit names are a v2 task.)'
++    call exit(31)
++  endif
++
+   return
+ end subroutine dust_grid_count_bins
+ 
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 7a762fa..5399ac6 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -17,6 +17,13 @@ implicit none
+ !Integer parameter to define number of grains to be used in simulation.
+ ! integer, parameter     :: nb_grains=1
+ integer                  :: nb_grains
++!> Hard cap on nb_grains. Grain/ice species-name indices are written with a
++!! 2-digit format (I2.2) into a character(2) buffer in input_output.f90 and
++!! gasgrain.f90; an index >= 100 overflows the field to '**', so bins 100+ collapse
++!! onto duplicate names ('GRAIN**') and coagulation products are silently routed to
++!! the wrong bin (mass non-conservation). Until the name builders AND parsers are
++!! widened to 3 digits (v2), init must refuse any grid with more than this many bins.
++integer, parameter       :: MAX_GRAINS_NAMEFMT = 99
+ real(double_precision),allocatable, dimension(:):: grain_radii,grain_temp
+ !> Dust size grid (stage 3). radius_grid is an alias kept for clarity in the
+ !! dust code; grain_radii remains the canonical array the chemistry consumes.
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index daea1c5..5edde91 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -552,6 +552,15 @@ else if (dust_grid_source.eq.'tabulated') then
+   endif
+   call get_linenumber(filename, nb_lines)
+   nb_grains = nb_lines
++  if (nb_grains.gt.MAX_GRAINS_NAMEFMT) then
++    write(Error_unit,*) 'Error (dust_grid, tabulated): ', trim(filename), ' has ', &
++      nb_grains, ' rows, exceeding the hard limit of ', MAX_GRAINS_NAMEFMT, '.'
++    write(Error_unit,*) 'Species-name indices use a 2-digit format (I2.2); bins >= 100', &
++      ' overflow to GRAIN** and silently corrupt the grid (mass non-conservation).'
++    write(Error_unit,*) 'Provide at most ', MAX_GRAINS_NAMEFMT, ' rows.', &
++      ' (3-digit names are a v2 task.)'
++    call exit(22)
++  endif
+ else
+   write(Error_unit,*) 'Error: dust_grid_source = "', trim(dust_grid_source), &
+                       '" unknown. Use derived or tabulated.'
+diff --git a/tests/grain_count_guard.sh b/tests/grain_count_guard.sh
+new file mode 100755
+index 0000000..12fb7f2
+--- /dev/null
++++ b/tests/grain_count_guard.sh
+@@ -0,0 +1,93 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/grain_count_guard.sh -- v1 guard: reject grids with more than 99 bins.
++#
++# Grain/ice species-name indices are written with a 2-digit format (I2.2) into a
++# character(2) buffer (input_output.f90, gasgrain.f90). An index >= 100 overflows
++# the field to '**', so bins 100+ collapse onto duplicate names ('GRAIN**') and
++# coagulation products are silently routed to the wrong bin -- mass is NOT
++# conserved (the x2.37 gain seen on the 149-bin grid). Until the name builders AND
++# parsers are widened to 3 digits (v2), init must REFUSE any grid with > 99 bins,
++# on BOTH the derived path (dust_grid_count_bins) and the tabulated path.
++#
++# This test asserts:
++#   A. derived    > 99 bins -> nmgc fails at init with the guard message.
++#   B. tabulated  > 99 rows -> nmgc fails at init with the guard message.
++#   C. derived   <= 99 bins -> the guard does NOT fire (grid is accepted).
++# Exit 0 = all three behave. Run from anywhere.
++# ===========================================================================
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++FIX="tests/fixture_dust_coag"
++NMGC="$ROOT/bin/nmgc"
++GUARD_RE='exceeding the hard limit'
++rc_all=0
++
++echo "[guard] building nmgc..."
++make >/tmp/grainguard_build.log 2>&1 || { echo "build FAIL"; tail -20 /tmp/grainguard_build.log; exit 3; }
++
++# setk <file> <key> <value> : replace the whole "key = ..." line in place.
++setk() {
++  local f="$1" key="$2" val="$3"
++  awk -v k="$key" -v v="$val" '
++    { if ($1==k && $2=="=") { print k" = "v } else { print } }' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
++}
++
++newrun() {  # -> echoes a fresh temp run dir seeded from the fixture
++  local r; r="$(mktemp -d)"; cp "$FIX"/*.in "$r"/ || { echo "fixture copy FAIL" >&2; exit 3; }
++  echo "$r"
++}
++
++# --- Case A: derived, > 99 bins (mass_ratio 1.08 on the fixture range -> ~136) ---
++A="$(newrun)"
++setk "$A/parameters.in" dust_grid_source derived
++setk "$A/parameters.in" dust_ic          MRN
++setk "$A/parameters.in" mass_ratio        "1.080E+00"
++outA="$( cd "$A" && "$NMGC" run 2>&1 )"; rcA=$?
++rm -rf "$A"
++if [ $rcA -ne 0 ] && grep -q "$GUARD_RE" <<<"$outA"; then
++  echo "[guard] A derived >99  : PASS (nmgc exited $rcA, guard fired)"
++else
++  echo "[guard] A derived >99  : FAIL (rc=$rcA, guard message present: $(grep -qc "$GUARD_RE" <<<"$outA" && echo yes || echo no))"
++  echo "$outA" | tail -5; rc_all=1
++fi
++
++# --- Case B: tabulated, 100 rows (> 99) ---
++B="$(newrun)"
++python3 - "$B/dust_grid_table.in" <<'PY'
++import sys
++with open(sys.argv[1], "w") as f:
++    f.write("! test tabulated grid: 100 rows -> must fail the >99 guard\n")
++    f.write("! columns: radius[cm]  1/n_k  T_d[K]  T_CR[K]\n")
++    for i in range(100):
++        a = 1.0e-6 * (1.1 ** i)
++        f.write(f"{a:.15E}  1.000000E+10  1.000000E+01  1.500000E+01\n")
++PY
++setk "$B/parameters.in" dust_grid_source tabulated
++setk "$B/parameters.in" dust_ic          tabulated
++outB="$( cd "$B" && "$NMGC" run 2>&1 )"; rcB=$?
++rm -rf "$B"
++if [ $rcB -ne 0 ] && grep -q "$GUARD_RE" <<<"$outB"; then
++  echo "[guard] B tabulated>99 : PASS (nmgc exited $rcB, guard fired)"
++else
++  echo "[guard] B tabulated>99 : FAIL (rc=$rcB, guard message present: $(grep -qc "$GUARD_RE" <<<"$outB" && echo yes || echo no))"
++  echo "$outB" | tail -5; rc_all=1
++fi
++
++# --- Case C: derived, <= 99 bins (mass_ratio 1.15 -> ~75): guard must NOT fire ---
++C="$(newrun)"
++setk "$C/parameters.in" dust_grid_source derived
++setk "$C/parameters.in" dust_ic          MRN
++setk "$C/parameters.in" mass_ratio        "1.150E+00"
++outC="$( cd "$C" && timeout 120 "$NMGC" run 2>&1 )"; rcC=$?
++rm -rf "$C"
++if ! grep -q "$GUARD_RE" <<<"$outC" && grep -q "NB OF GRAINS" <<<"$outC"; then
++  echo "[guard] C derived<=99  : PASS (grid accepted, guard silent; $(grep 'NB OF GRAINS' <<<"$outC" | tail -1 | tr -s ' '))"
++else
++  echo "[guard] C derived<=99  : FAIL (guard fired on a <=99 grid, or init never reached; rc=$rcC)"
++  echo "$outC" | tail -8; rc_all=1
++fi
++
++echo
++if [ $rc_all -eq 0 ]; then echo "[guard] ALL PASS"; else echo "[guard] FAILURES ABOVE"; fi
++exit $rc_all
+-- 
+2.43.0
+

@@ -1,0 +1,193 @@
+From 02b07f24a144ea343fb4dd5fc65b60be8959c61f Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Sat, 15 Aug 2026 12:59:10 +0000
+Subject: [PATCH 3/4] Phase II: monodisperse dust IC + constant-kernel analytic
+ gate (b1)
+
+Adds the analytic validation for Rung 1 coagulation and the IC it needs.
+
+dust_ic = 'monodisperse' (dust_grid.f90 / get_grain_radii dispatch): all grains
+in bin 1, normalised to sum_k n_k m_k = initial_dtg_mass_ratio * AMU; empty bins
+get a huge GTODN so their abundance is ~0. This is the single-size initial state
+the closed-form Smoluchowski solution assumes.
+
+tests/coag_gate.sh: permanent gate. Runs the dust-only fixture with the
+monodisperse IC and constant kernel K0, sized so the trajectory spans the knee,
+and asserts
+  * gate (a): mass Sum m_k n_k conserved to machine precision;
+  * gate (b1): total number N(t) = N0/(1 + K0*nH*N0*(t-t0)/2) within 5%.
+Measured on the 16-bin fixture (N/N0 -> 0.098 over 2000 yr):
+  gate (a) mass rel-err  = 5.4e-15
+  gate (b1) decay rel-err= 2.2e-05   (at the DLSODES rtol=1e-4 floor)
+Top-bin occupancy stays ~1e-26 over the window, so the Rung 1 overflow-skip
+policy drops no flux and the boundary-free analytic solution is valid here.
+
+Bug fix (input_output write_parameters): the coagulation settings were read but
+never written back, so init's parameters.in rewrite silently dropped them and a
+re-run would lose coagulation. Now coagulation / coagulation_kernel /
+constant_kernel_k0 are persisted. Simulation numerics unchanged: coagulation-OFF
+jac_weight_check is still identical (13450 entries, worst reldiff 1.8006e-3, 0
+weight bugs).
+
+Rung 1 (pure grain coagulation, constant kernel) is now validated end to end:
+mass-exact and matching the analytic decay. Remaining follow-ups: wire the
+dropped-flux diagnostic into the output stream; Brownian kernel (Rung 1b).
+---
+ src/dust/dust_grid.f90 | 22 +++++++++++++
+ src/input_output.f90   | 10 ++++--
+ tests/coag_gate.sh     | 75 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 105 insertions(+), 2 deletions(-)
+ create mode 100755 tests/coag_gate.sh
+
+diff --git a/src/dust/dust_grid.f90 b/src/dust/dust_grid.f90
+index 6ee4447..0cb2ee1 100644
+--- a/src/dust/dust_grid.f90
++++ b/src/dust/dust_grid.f90
+@@ -185,6 +185,28 @@ subroutine dust_ic_mrn()
+   return
+ end subroutine dust_ic_mrn
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Monodisperse initial dust distribution: all grains in bin 1. This is
++!! the initial condition for the constant-kernel analytic coagulation gate, whose
++!! closed form N(t) = N0 / (1 + K0 N0 t / 2) assumes a single initial size.
++!! Empty bins get a huge GTODN so their abundance 1/GTODN is ~0.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine dust_ic_monodisperse()
++
++  implicit none
++  integer :: k
++  real(double_precision) :: n1
++
++  ! sum_k n_k m_k = initial_dtg_mass_ratio * AMU (per H), all mass in bin 1
++  n1 = initial_dtg_mass_ratio * AMU / mass_grid(1)
++  GTODN_0D_temp(1) = 1.d0 / n1
++  do k=2,nb_grains
++    GTODN_0D_temp(k) = 1.d300   ! empty bin: abundance = 1/GTODN ~ 0
++  enddo
++
++  return
++end subroutine dust_ic_monodisperse
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ ! Small geometry helpers. m = (4/3) pi rho a^3.
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 82e4f7a..bfb76d3 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -408,7 +408,11 @@ use global_variables
+   write(10,'(a)') "!*****************************"
+   write(10,'(a)') "!*   Dust IC (populates grid)*"
+   write(10,'(a)') "!*****************************"
+-  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN or tabulated'
++  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN, monodisperse or tabulated'
++  write(10,'(a)') "! Coagulation (Rung 1): grain coagulation via the Smoluchowski kernel."
++  write(10,'(a,i0,a)') 'coagulation = ', merge(1,0,coagulation), ' ! 0/1 master switch'
++  write(10,'(a,a,a)') 'coagulation_kernel = ', trim(coagulation_kernel), ' ! constant (Rung 1) or brownian'
++  write(10,'(a,es10.3e2,a)') 'constant_kernel_k0 = ', constant_kernel_k0, ' ! [cm^3/s] constant kernel for the analytic gate'
+   write(10,'(a,es10.3e2,a)') 'dust_power_law_index = ', dust_power_law_index, &
+     ' ! MRN exponent dn/da ~ a^index (-3.5 = MRN), normalised by initial_dtg_mass_ratio'
+   write(10,'(a)') ""
+@@ -581,6 +585,8 @@ endif
+ ! --- Initial distribution (populates the grid, does not define it) -------
+ if (dust_ic.eq.'MRN') then
+   call dust_ic_mrn()                   ! fills GTODN_0D_temp = 1/n_k
++else if (dust_ic.eq.'monodisperse') then
++  call dust_ic_monodisperse()          ! all grains in bin 1 (analytic coagulation gate)
+ else if (dust_ic.eq.'tabulated') then
+   if (dust_grid_source.ne.'tabulated') then
+     write(Error_unit,*) 'Error: dust_ic = tabulated currently requires &
+@@ -589,7 +595,7 @@ else if (dust_ic.eq.'tabulated') then
+   endif
+   ! GTODN_0D_temp already holds the tabulated 1/abundance column.
+ else
+-  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN or tabulated.'
++  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN, monodisperse or tabulated.'
+   call exit(31)
+ endif
+ 
+diff --git a/tests/coag_gate.sh b/tests/coag_gate.sh
+new file mode 100755
+index 0000000..7df6eb6
+--- /dev/null
++++ b/tests/coag_gate.sh
+@@ -0,0 +1,75 @@
++#!/usr/bin/env bash
++#==============================================================================
++# Rung 1 coagulation analytic gate (constant kernel).
++#
++# Runs the dust-only fixture with a MONODISPERSE initial condition (all grains in
++# bin 1) and a constant coagulation kernel K0, sized so the run spans the knee of
++# the closed-form Smoluchowski total-number decay, then asserts:
++#
++#   Gate (a)  mass  Sum_k m_k n_k conserved to machine precision.
++#   Gate (b1) total number  N(t) = N0 / (1 + K0 * nH * N0 * (t-t0) / 2)
++#             reproduced to within 5% across the whole trajectory.
++#
++# The 1/2 is the constant-kernel self-collision factor. Overflow (top-bin) pairs
++# are not generated in Rung 1; the grid is sized so they stay unpopulated, which
++# is exactly what keeps the boundary-free analytic solution valid. If a future
++# change breaks mass conservation, the redistribution weights, or the kernel
++# normalisation, this gate fails.
++#==============================================================================
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++
++echo "[coag_gate] building (-O0)..."
++make OPT=-O0 >/dev/null 2>&1
++
++RUN="$(mktemp -d)"
++trap 'rm -rf "$RUN"' EXIT
++cp tests/fixture_dust_coag/*.in "$RUN"/
++# Monodisperse IC + a window that spans the analytic knee (~2e3 yr for this grid/K0).
++sed -i 's/^dust_ic = MRN/dust_ic = monodisperse/; s/^stop_time = .*/stop_time =  2.000E+03/; s/^nb_outputs = .*/nb_outputs = 25/' "$RUN"/parameters.in
++
++echo "[coag_gate] running in $RUN ..."
++( cd "$RUN" && "$ROOT/bin/nmgc" run >run.log 2>&1 )
++
++python3 - "$RUN" <<'PYEOF'
++import sys, collections
++RUN = sys.argv[1]
++rows = [l.split() for l in open(RUN+"/dust_distribution.out")
++        if not l.startswith("!") and l.strip()]
++byt = collections.OrderedDict()
++for p in rows:
++    if len(p) < 9: continue
++    t = float(p[0]); d = byt.setdefault(t, {'num':0.0, 'mass':0.0})
++    d['num']  += float(p[4])   # n_k [/H]
++    d['mass'] += float(p[5])   # m_k*n_k [g/H]
++
++P = {}
++for l in open(RUN+"/parameters.in"):
++    if '=' in l and not l.strip().startswith('!'):
++        k, v = l.split('=', 1); P[k.strip()] = v.split('!')[0].strip()
++K0 = float(P['constant_kernel_k0']); nH = float(P['initial_gas_density'])
++YR = 3.1556952e7
++
++times = list(byt)
++t0 = times[0]; N0 = byt[t0]['num']; m0 = byt[t0]['mass']
++mass_worst = max(abs(byt[t]['mass'] - m0)/m0 for t in times)
++fit_worst = 0.0
++for t in times:
++    Nana = N0 / (1.0 + 0.5*K0*nH*N0*(t - t0)*YR)
++    fit_worst = max(fit_worst, abs(byt[t]['num'] - Nana)/Nana)
++
++print("=================================================================")
++print(" Rung 1 coagulation analytic gate (constant kernel)")
++print("=================================================================")
++print(" outputs                = %d over %.4g..%.4g yr" % (len(times), times[0], times[-1]))
++print(" N/N0 at end            = %.4f" % (byt[times[-1]]['num']/N0))
++print(" gate (a) mass rel-err  = %.3e   (tol 1e-10)" % mass_worst)
++print(" gate (b1) decay rel-err= %.3e   (tol 5e-2)"  % fit_worst)
++ok = (mass_worst < 1e-10) and (fit_worst < 5e-2)
++print(" RESULT: %s" % ("PASS" if ok else "FAIL"))
++sys.exit(0 if ok else 1)
++PYEOF
++rc=$?
++echo "[coag_gate] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"
++exit $rc
+-- 
+2.43.0
+

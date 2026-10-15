@@ -1,0 +1,153 @@
+From d98ade4c9297ef35a1e30125951292055f552648 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 12:18:13 +0200
+Subject: [PATCH] charging: optional Draine-Sutin Coulomb/image focusing for
+ type-0 rates (default off)
+
+Measurement switch for sec:charge / sec:moneyplot (charge_focusing_check_brief). The
+type-0 grain-charging reactions use purely geometric rate coefficients, omitting the
+Coulomb attraction of ions to negative grains and the image attraction of electrons to
+neutral grains -- which is why the run comes out ~99% negative in every bin and inflates
+the charge suppression of coagulation to a spurious ~11x.
+
+- C1: two new parameters.in keys, read in read_parameters_in and written by the writer,
+  defaulted in global_variables so an old parameters.in (lacking them) is bit-identical:
+    charging_focusing (int, default 0): 0 keeps geometric rates bit for bit; 1 applies
+      the focusing factors. electron_sticking (real, default 1.0): multiplies the e-
+      attachment rate, applied only when charging_focusing = 1.
+- C2: set_constant_rates type-0 loop, when charging_focusing = 1, multiplies each rate by
+  the Draine & Sutin (1987) singly-charged closed form for this bin's reduced temperature
+  tau_k = a_k k_B T_gas / e^2 (e = 4.80320471e-10 esu):
+    electron onto neutral grain : s_e * (1 + sqrt(pi/(2 tau)))
+    cation  onto negative grain : (1 + 1/tau)(1 + sqrt(2/(tau+2)))
+  The projectile is identified from the reactants (e- = INDEL, or SPECIES_CHARGE = +1);
+  a type-0 reaction matching neither aborts with an explicit message. No Jacobian change
+  (the factor is abundance-independent; get_jacobian uses reaction_rates).
+
+Verified: params_roundtrip ALL PASS; kernel-isolated gtodn_jac_fd_check byte-identical
+with the switch on vs off (RESULT PASS, grain-col rel-err 3.7e-7); money-plot R0
+(focusing=0) abundances.out byte-identical to the baseline binary; R0 charge metrics
+reproduce the drafting-thread baseline exactly.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MZiMaHQmctaoPSEVjYonWi
+---
+ src/global_variables.f90 |  8 ++++++++
+ src/input_output.f90     | 14 ++++++++++++--
+ src/ode_solver.f90       | 36 +++++++++++++++++++++++++++++++++---
+ 3 files changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index 5399ac6..c2e703e 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -271,6 +271,14 @@ real(double_precision), allocatable, dimension(:) :: ACC_RATES_PREFACTOR !< dim(
+ real(double_precision), allocatable, dimension(:) :: TUNNELING_RATE_TYPE_1 !< dim(nb_species) Quantum tunneling diffusion rate [s-1] (Watson 1976) (dEB.BOLTZ) / (4.HBAR.nb_sites_per_grain)
+ real(double_precision), allocatable, dimension(:) :: TUNNELING_RATE_TYPE_2 !< dim(nb_species) Quantum tunneling diffusion rate [s-1] (Hasegawa & Herbst 1992) VIBRATION_FREQUENCY / nb_sites_per_grain.EXP(-2.DIFFUSION_BARRIER_THICKNESS / HBAR.(2.AMU.SMA.BOLTZ.EB)^1/2)
+ integer, allocatable, dimension(:) :: SPECIES_CHARGE !< dim(nb_species) !< electric charge [in e-] for each species, 0 if neutral, positive or negative if ions.
++!> Grain-charging Coulomb/image focusing switch (Draine & Sutin 1987). Default 0 keeps
++!! the purely geometric type-0 charging rates bit for bit. 1 multiplies each type-0 rate
++!! by the per-bin focusing factor (see set_constant_rates). This is a measurement switch
++!! for sec:charge; it changes no physics default.
++integer :: charging_focusing = 0
++!> Electron sticking coefficient, applied to the electron-attachment rate ONLY when
++!! charging_focusing = 1 (the current A value already corresponds to sticking 1). Default 1.0.
++real(double_precision) :: electron_sticking = 1.0d0
+ 
+ ! Arrays about reactions
+ character(len=11), allocatable, dimension(:,:) :: REACTION_COMPOUNDS_NAMES !< dim(MAX_COMPOUNDS,nb_reactions). Empty string means no species
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 5edde91..e290008 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -486,6 +486,10 @@ use global_variables
+   write(10, '(a)') '! linear: Output times are linearly spaced'
+   write(10, '(a)') '! log   : Outputs times are log-spaced'
+   write(10,'(a,es24.16e3, a)') 'relative_tolerance = ',RELATIVE_TOLERANCE, ' ! Relative tolerance of the solver'
++  write(10,'(a,i0,a)') 'charging_focusing = ', charging_focusing, &
++    ' ! 0: geometric type-0 charging rates (default, bit-identical); 1: Draine-Sutin Coulomb/image focusing'
++  write(10,'(a,es24.16e3,a)') 'electron_sticking = ', electron_sticking, &
++    ' ! electron sticking coefficient, applied to e- attachment only when charging_focusing = 1'
+   write(10,'(a,es24.16e3,a)') 'minimum_initial_abundance = ', MINIMUM_INITIAL_ABUNDANCE, ' ! default minimum initial &
+                              &fraction abundance'
+   write(10,'(a,es24.16e3,a)') 'grain_abundance_floor = ', grain_abundance_floor, ' ! [grains/cm^3] floor on the grain &
+@@ -816,8 +820,14 @@ if (isDefined) then
+       ! Solver
+       case('relative_tolerance', 'RTOL') ! The old name is kept for compatibility reasons
+         read(value, *) RELATIVE_TOLERANCE
+-      
+-      !Switches      
++
++      ! Grain-charging Coulomb/image focusing (Draine & Sutin 1987); default off = bit-identical.
++      case('charging_focusing')
++        read(value, *) charging_focusing
++      case('electron_sticking')
++        read(value, *) electron_sticking
++
++      !Switches
+       case('is_3_phase')
+         read(value, *) is_3_phase
+ 
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index 29f8e00..8ce6c47 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -1032,14 +1032,19 @@ end subroutine get_temporal_derivatives
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+   subroutine set_constant_rates()
+ 
+-  use global_variables 
+-  
++  use global_variables
++  use iso_fortran_env, only: error_unit
++
+   implicit none
+ 
+   ! Locals
+   real(double_precision) :: T300, TI, TSQ
+   integer :: nsta, nfin
+   integer :: i,k, j, w, m, n, ic_i
++  ! --- grain-charging Coulomb/image focusing (Draine & Sutin 1987) ---
++  real(double_precision), parameter :: E_ESU2 = 4.80320471d-10 * 4.80320471d-10  ! e^2 [esu^2, cgs]
++  real(double_precision) :: tau_k, focus_factor
++  integer :: ipart
+   integer, dimension(10) :: indice
+   real(double_precision), dimension(10) :: distmin, distmax
+   real(double_precision) :: activ,grain_radius_factor
+@@ -1070,7 +1075,32 @@ end subroutine get_temporal_derivatives
+   do J=type_id_start(0),type_id_stop(0)
+     grain_radius_factor = grain_radii(GRAIN_RANK(J))*grain_radii(GRAIN_RANK(J)) / (1.E-5*1.E-5)
+     reaction_rates(J)  = grain_radius_factor * RATE_A(J) * (T300**RATE_B(J))
+-    
++
++    ! Coulomb/image focusing of the geometric charging rate (Draine & Sutin 1987),
++    ! singly-charged projectiles only. Default off -> rates unchanged bit for bit.
++    if (charging_focusing.eq.1) then
++      ! reduced temperature of this grain bin: tau = a_k k_B T_gas / e^2
++      tau_k = grain_radii(GRAIN_RANK(J)) * K_B * actual_gas_temp / E_ESU2
++      ! the projectile is the non-grain reactant: e- (INDEL) or a singly-charged cation
++      if (reactant_1_idx(J).eq.INDEL .or. SPECIES_CHARGE(reactant_1_idx(J)).eq.1) then
++        ipart = reactant_1_idx(J)
++      else
++        ipart = reactant_2_idx(J)
++      endif
++      if (ipart.eq.INDEL) then
++        ! electron onto a neutral grain: factor = s_e * (1 + sqrt(pi/(2 tau)))
++        focus_factor = electron_sticking * (1.d0 + sqrt(PI / (2.d0*tau_k)))
++      else if (SPECIES_CHARGE(ipart).eq.1) then
++        ! singly-charged cation onto a negative grain: (1 + 1/tau)(1 + sqrt(2/(tau+2)))
++        focus_factor = (1.d0 + 1.d0/tau_k) * (1.d0 + sqrt(2.d0/(tau_k + 2.d0)))
++      else
++        write(error_unit,*) 'FATAL (set_constant_rates): charging_focusing = 1 but type-0 reaction ', J, &
++          ' is neither (neutral grain + e-) nor (negative grain + singly-charged cation).'
++        call exit(32)
++      endif
++      reaction_rates(J) = reaction_rates(J) * focus_factor
++    endif
++
+ !     write(*,*)reaction_rates(J), grain_radii(GRAIN_RANK(J)),GRAIN_RANK(J) ,j
+   enddo
+   
+-- 
+2.43.0
+

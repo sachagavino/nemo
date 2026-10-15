@@ -36,6 +36,7 @@ contains
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
 subroutine init_gasgrain()
 use global_variables
+use dust_evolution
 
 implicit none
 
@@ -51,6 +52,34 @@ call read_parameters_in()           ! Read simulation parameters. Need to read i
 call get_grain_radii()              ! Read grain radius in cm
 call get_YGRAIN()                   ! initialize character variables YGRAIN and YGRAIN_MINUS
 call read_element_in()              ! Read list of prime elements, including their atomic mass (in AMU)
+! Coagulation transports only surface (J) ice; mantle (K) ice transport is not
+! implemented, so coagulation is 2-phase only in v1. Fail loudly rather than
+! silently leaving mantle ice untransported.
+if (coagulation .and. is_3_phase.eq.1) then
+  write(error_unit,'(a)') 'Error: coagulation ice transport is 2-phase only in v1 &
+    &(mantle K-ice transport is not implemented). Set is_3_phase = 0 or coagulation = 0.'
+  call exit(33)
+endif
+! Rung 5 v1 scope guard (brief decision 6). The dynamic surface-rate GTODN
+! substitution and its analytic grain-abundance Jacobian entries are derived only
+! for the three in-scope reaction classes (accretion, photodesorption, LH) in the
+! 2-phase config. The modified-rate scheme and the Eley-Rideal/CIR channel make a
+! surface rate's grain-abundance power branch-dependent or cancelling
+! (classification doc rows G-J), so a blanket entry would be silently wrong. Fail
+! loudly rather than mis-compute a Jacobian. is_3_phase is enforced just above
+! (classification doc rows K-L). modified-LH / ER / 3-phase Jacobians are v2.
+if (coagulation .and. (MODIFY_RATE_FLAG.ne.0 .or. is_er_cir.ne.0)) then
+  write(error_unit,'(a)') 'Error: coagulation (dynamic GTODN, Rung 5) is supported &
+    &only with modify_rate_flag = 0 and is_er_cir = 0 in v1. These confounders make a &
+    &surface rate''s grain-abundance dependence branch-dependent or cancelling, and &
+    &their Jacobian entries are not derived. Set modify_rate_flag = 0 and is_er_cir = 0, &
+    &or set coagulation = 0.'
+  call exit(34)
+endif
+! Coagulation reactions are appended to the network as a terminal block. Count
+! them now -- after the grid (mass_grid) exists, BEFORE get_array_sizes sizes the
+! reaction arrays. Off by default => nb_coagulation_reactions stays 0.
+if (coagulation) call dust_coagulation_count()
 call get_array_sizes()              ! Get various size needed for allocatable arrays
 
 ! Physical structure of the 0D box.
@@ -62,19 +91,28 @@ get_structure_properties => get_structure_properties_fixed
 ! Initialize grain temperature prescription.
 !! HOOK (stage 3): these become explicit Td(a) prescriptions evaluated once on
 !! the size grid, together with T_CR,peak(a).
-select case(GRAIN_TEMPERATURE_TYPE)
-  case('fixed_to_dust_size') ! one temperature per size bin
-    get_grain_temperature => get_grain_temperature_fixed_to_dust_size
+! dust_grid_source is the single grid switch and sets WHERE per-bin Td comes from:
+! tabulated -> the table column; derived -> the derived_temperature sub-switch
+! (size_scaled = Td(a) via td_of_a; gas = Tgrain=Tgas). The runtime pointer reads the
+! per-bin grain_temp(:) array in every per-bin case (filled by td_of_a on derived, by
+! the table on tabulated) and uses the gas temperature only for derived + gas.
+if (trim(dust_grid_source) == 'tabulated') then
+  get_grain_temperature => get_grain_temperature_fixed_to_dust_size   ! per-bin Td from the table column
+else
+  select case(trim(DERIVED_TEMPERATURE))
+    case('size_scaled') ! Td(a) = reference_dust_temperature*(a/reference_grain_radius)^(-1/6)
+      get_grain_temperature => get_grain_temperature_fixed_to_dust_size
 
-  case('gas') ! Tgrain = Tgas
-    get_grain_temperature => get_grain_temperature_gas
+    case('gas')         ! Tgrain = Tgas for every bin
+      get_grain_temperature => get_grain_temperature_gas
 
-  case default
-    write(error_unit,*) 'The GRAIN_TEMPERATURE_TYPE="', trim(GRAIN_TEMPERATURE_TYPE),'" cannot be found.'
-    write(error_unit,*) 'Values possible : fixed_to_dust_size, gas'
-    write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
-    call exit(10)
-end select
+    case default
+      write(error_unit,*) 'derived_temperature="', trim(DERIVED_TEMPERATURE),'" not recognised.'
+      write(error_unit,*) 'Values possible (derived grid): size_scaled, gas'
+      write(error_unit, '(a)') 'Error in subroutine init_gasgrain.'
+      call exit(10)
+  end select
+endif
 
 ! Init global allocatable arrays. From now on, we can read data files
 call initialize_global_arrays()
@@ -84,6 +122,13 @@ call read_species()
 
 ! Read list of reactions for gas and grains
 call read_reactions()
+
+! Append the coagulation pseudo-reactions at the NAME level (reactant/product
+! grain-bin names, type, redistribution weights). MUST precede index_datas -- its
+! type scan needs REACTION_TYPE -- and set_chemical_reactants/init_relevant_reactions,
+! which resolve the names to IDs the Jacobian columns are built from. Rates are set
+! later (after init_reaction_rates, which would otherwise clobber them). Off by default.
+if (coagulation) call dust_coagulation_inject_static()
 
 ! Precompute the per-species / per-reaction grain-rank, phase and ice-species
 ! index maps so the RHS need not re-parse species names on every call.
@@ -111,6 +156,11 @@ call get_gas_surface_species()
 
 ! Initialization of elemental/chemical quantities
 call index_datas()
+
+! Coagulation kernel coefficients are set below, once the gas temperature is
+! available (the Brownian kernel needs it). They only need to precede the first
+! RHS evaluation; nothing between here and there uses the coag rate VALUES (the
+! reaction coupling that drives sparsity comes from the resolved compound IDs).
 
 ! Calculate the initial abundances for all elements that compose the species
 ! Here it is assumed that all the cells in 1D have the same elemental abundances
@@ -149,6 +199,11 @@ do i=1,nb_grains
   abundances(INDGRAIN_MINUS(i)) = 0.d0
 enddo
 
+! Place the deferred base-ice totals onto the grid (area-weighted default, or a
+! per-species override), now that the grain populations n_k and nb_sites_per_grain
+! are available. Off unless coagulation is on and abundances.in gave a base-ice total.
+if (coagulation .and. nb_ice_ic > 0) call dust_ice_place()
+
 !Compute the initial abundance of electrons
 ! this is particularly needed for 1D simulations since the subroutine check_conservation is not done in 1D
 
@@ -179,6 +234,11 @@ actual_dust_temp(:) = dust_temperature(:)
 actual_av = visual_extinction
 actual_gas_density = H_number_density
 
+! Coagulation kernel coefficients (constant, or Brownian using the gas temperature
+! just set above). Must follow index_datas -> init_reaction_rates (which would
+! otherwise overwrite the coag slots) and precede the first RHS evaluation.
+if (coagulation) call dust_coagulation_set_rates()
+
 ! Write species name/index correspondance
 call write_species()
 
@@ -189,13 +249,35 @@ call set_chemical_reactants()
 !! max_reactions_same_species is set here. nb_reactions_using_species and relevant_reactions array are set here.
 call init_relevant_reactions()
 
+! Rung 5: build the dynamic-GTODN Jacobian map (reverse species->bin map + in-scope
+! reaction classification) whenever dynamic GTODN can be active -- coagulation on, or
+! the force-dynamic verification override (gate 5b, coag off). Must precede the first
+! get_jacobian call (count_nonzeros below), which otherwise dereferences the unbuilt
+! map. Pure integer bookkeeping; it never touches rates, so coag-off is unaffected.
+if (coagulation .or. force_dynamic_gtodn_override()) call build_gtodn_jacobian_map()
+
 ! Calculate the optimum number for temporary solving-arrays in ODEPACK, based on the number of non-zeros values in 
 !! the jacobian
 call count_nonzeros()
 
+! Require the complete symbolic pattern only when the selected method actually consumes
+! a user-supplied pattern (MOSS=0: mf < 100 -- the FD-complete oracle 022 or Rung 5's
+! analytic-complete 021). Production ships 121 (MOSS=1), which discovers structure from
+! get_jacobian and ignores the supplied pattern, so coag-on+121 runs fine with numerical
+! (e.g. the 3b/3c physics gates on the fixture). The numerical pattern omits the
+! live-divisor block, so it cannot serve as the MOSS=0 basis; symbolic is required there.
+if (coagulation .and. solver_method_flag().lt.100 .and. sparsity.ne.'symbolic') then
+  write(Error_unit,'(a)') 'FATAL: this solver method supplies the sparsity pattern (MOSS=0) '// &
+    'and requires sparsity = symbolic (the numerical pattern omits the live-divisor block).'
+  stop 1
+endif
+
 ! In symbolic mode, build the fixed sparsity superset once from the reaction list
 ! (also raises nb_nonzeros_values to the symbolic per-column max for work sizing).
 if (sparsity.eq.'symbolic') call build_symbolic_sparsity()
+
+! Rung 4 gate (a): assert the live-divisor block made it into the symbolic pattern.
+if (coagulation .and. sparsity.eq.'symbolic') call assert_live_divisor_in_pattern()
 
 
 ! Do preliminary tests, before starting the integration
@@ -222,6 +304,84 @@ WRITE(*,'(a)')""
 call flush(stdo)
 
 end subroutine init_gasgrain
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief DLSODES method flag, selected at runtime from (coagulation, sparsity).
+!! MF decodes as MOSS=MF/100, then METH, MITER. 121 and 021 are BOTH MITER=1
+!! (analytic Jacobian values from get_jacobian); they differ only in MOSS, i.e. in
+!! how the sparsity PATTERN is obtained, not in how the values are computed. The
+!! FD-complete path (022, MITER=2) is a verification oracle reached only via the
+!! NEMO_ORACLE_MF environment variable.
+!!
+!! coag OFF                    -> 121 (MOSS=1: solver probes the pattern). Grains
+!!   frozen, live divisor inactive; reproduces nmgc-2.0 bit-for-bit
+!!   (equivalence.sh), which MOSS=0/MITER=2 would break.
+!! coag ON, sparsity=symbolic  -> 021 (MOSS=0: supplied symbolic pattern + analytic
+!!   get_jacobian). Rung 5c. The reciprocal GTODN entries are supplied analytically,
+!!   and the symbolic superset carries by construction the three couplings that are
+!!   zero at a single probe state but live later -- live divisor pre-ice,
+!!   photodesorption at SUMLAY~0, LH reciprocal at t=0 -- which a MOSS=1 probe can
+!!   silently drop. 021 ties 121 on convergence and is bit-identical (both MITER=1);
+!!   the symbolic pattern is the guarantee. See docs/PhaseII_rung5_site_classification.md.
+!! coag ON, sparsity=numerical -> 121 (021 would FATAL: the numerical pattern omits
+!!   the live-divisor block).
+!!
+!! Oracle override: NEMO_ORACLE_MF forces the flag (e.g. 22 = FD-complete: MOSS=0 +
+!!   complete symbolic pattern + MITER=2). For the gate/oracle harness only; never
+!!   set in production configs.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+integer function solver_method_flag()
+use global_variables
+implicit none
+integer :: oracle
+
+oracle = oracle_mf_override()
+if (oracle.ne.0) then
+  solver_method_flag = oracle
+  return
+endif
+
+if (coagulation .and. sparsity.eq.'symbolic') then
+  ! Rung 5c: retarget the coagulation production path to 021 (MOSS=0: symbolic
+  ! structure + analytic get_jacobian, MITER=1). 021 ties 121 on measured
+  ! convergence and gives bit-identical results (both are MITER=1 analytic; FD is
+  ! 022, ~50x slower), but it eliminates the MOSS=1 single-state-probe hazard:
+  ! 121 infers the sparsity by probing get_jacobian at each interval's starting
+  ! state, so a coupling that is zero at the probe state but nonzero later can be
+  ! silently dropped -- and this project has three such couplings (live divisor
+  ! pre-ice, photodesorption at SUMLAY~0, LH reciprocal at t=0). The symbolic
+  ! superset carries them all by construction; the symbolic requirement IS the
+  ! guarantee, not a burden. See docs/PhaseII_rung5_site_classification.md sec 4.5.
+  solver_method_flag = 21
+else if (coagulation) then
+  ! coag-on but sparsity=numerical: 021 would FATAL (the numerical pattern omits
+  ! the live-divisor block), so keep the MOSS=1 auto-probe path here.
+  solver_method_flag = 121
+else
+  ! coag-off: unchanged -- preserves the bit-for-bit nmgc-2.0 equivalence (121).
+  solver_method_flag = 121
+endif
+
+return
+end function solver_method_flag
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Read the NEMO_ORACLE_MF environment variable (verification/test only).
+!! Returns 0 when unset/blank/unparseable (production default), else the forced mf.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+integer function oracle_mf_override()
+implicit none
+character(len=32) :: v
+integer :: ln, st, val
+
+oracle_mf_override = 0
+call get_environment_variable('NEMO_ORACLE_MF', v, ln, st)
+if (st.ne.0 .or. ln.le.0) return
+read(v, *, iostat=st) val
+if (st.eq.0) oracle_mf_override = val
+
+return
+end function oracle_mf_override
 
 
 
@@ -457,6 +617,21 @@ do I=0,MAX_NUMBER_REACTION_TYPE-1
     if ((REACTION_TYPE(J).EQ.I).AND.(type_id_start(I).EQ.0)) type_id_start(I)=J
     if (REACTION_TYPE(J).EQ.I) type_id_stop(I)=J
   enddo
+enddo
+
+! Absent reaction types leave the scan at (start,stop)=(0,0). The many rate loops of
+! the form `do J=type_id_start(T),type_id_stop(T)` (e.g. the type-97 Bron et al. block
+! in set_dependant_rates) would then run once at J=0 and index the reaction arrays
+! (RATE_C, RATE_A, reaction_rates, ...) out of bounds -- undefined behaviour that -O2
+! on Linux happens to tolerate (index 0 aliases harmless adjacent memory) but that
+! faults on macOS. Turn each absent range into the empty do-loop range [1,0] so those
+! loops iterate zero times. Applies to every network (a chemistry-free coagulation
+! grid, or a full network missing a looped type); the J=0 iteration only ever wrote
+! the out-of-bounds slot 0, never a real rate, so removing it is byte-identical on the
+! reaction arrays 1..nb_reactions. The tiling validator below keys on stop==0 and
+! treats [1,0] and [0,0] identically as "type not defined".
+do I=0,MAX_NUMBER_REACTION_TYPE-1
+  if (type_id_stop(I).eq.0) type_id_start(I)=1
 enddo
 
 ! Find the index of CO, H2, H, He and grain0 PLUS H2O and a few other contained in folder cross-sections.
@@ -750,7 +925,11 @@ end subroutine index_datas
     ! For each reaction, we search if there is an activation energy defined for it.
     ! the "all()" function can compare array element by element to ensure that everything is equal one by one. usefull to find 
     ! if we have the good reaction
-    do I=1,nb_reactions
+    ! init_reaction_rates computes chemistry rate coefficients only; the
+    ! coagulation block (appended at the end) gets its kernel from
+    ! dust_coagulation_set_rates. Bound every reaction sweep to
+    ! nb_chemistry_reactions -- identical to nb_reactions when coagulation is off.
+    do I=1,nb_chemistry_reactions
       ACTIVATION_ENERGY(I)=0.d0
       
       do J=1,NEA
@@ -799,7 +978,7 @@ end subroutine index_datas
     enddo
 ! pause
     ! === Cycle all reactions
-    do J=1,nb_reactions
+    do J=1,nb_chemistry_reactions
 
       ! ------ Initialise all branching_ratio rate factors, and get species 1 & 2
       branching_ratio(J)=1.0d0
@@ -815,7 +994,7 @@ end subroutine index_datas
         NPATH=0
 
         ! ------ Check for branching
-        do K=1,nb_reactions
+        do K=1,nb_chemistry_reactions
            if(REACTION_TYPE(K).EQ.REACTION_TYPE(J)) then
              if (((REACTION_COMPOUNDS_NAMES(1,J).EQ.REACTION_COMPOUNDS_NAMES(1,K)).AND.&
                   (REACTION_COMPOUNDS_NAMES(2,J).EQ.REACTION_COMPOUNDS_NAMES(2,K))).OR.&
@@ -1083,7 +1262,7 @@ end subroutine index_datas
 
       ! ------ Calculate evaporation fraction
       NEVAP=0
-      do K=1,nb_reactions
+      do K=1,nb_chemistry_reactions
         if ((REACTION_COMPOUNDS_NAMES(4,J)(:1).EQ.'J').AND.(RATE_A(K).NE.0.d0)) then
           if ((REACTION_COMPOUNDS_NAMES(1,J).EQ.REACTION_COMPOUNDS_NAMES(1,K)).AND.&
           (REACTION_COMPOUNDS_NAMES(2,J).EQ.REACTION_COMPOUNDS_NAMES(2,K)).AND.&
@@ -1476,6 +1655,11 @@ if (IS_TEST.eq.1) then
   ! CHECK that reactions are equilibrated (for prime elements)
   do reaction=1,nb_reactions
 !   write(*,*) reaction
+    ! Coagulation reactions conserve MASS via the per-product redistribution
+    ! weights, which this integer atom-count balance cannot see (2 grains -> 1
+    ! grain, split across two bins). Their conservation is validated by the
+    ! mass-conservation diagnostic (gate a), not here.
+    if (REACTION_TYPE(reaction).eq.COAGULATION_TYPE) cycle
     do element=1,NB_PRIME_ELEMENTS
       left_sum = 0
       do compound=1,MAX_REACTANTS
@@ -1505,6 +1689,7 @@ if (IS_TEST.eq.1) then
 
   ! CHECK that reactions are equilibrated (for charge)
   do reaction=1,nb_reactions
+    if (REACTION_TYPE(reaction).eq.COAGULATION_TYPE) cycle   ! neutral grain bins; see note above
     left_sum = 0
     do compound=1,MAX_REACTANTS
       tmp_name = REACTION_COMPOUNDS_NAMES(compound,reaction)
@@ -1723,8 +1908,9 @@ if (IS_TEST.eq.1) then
   
   ! Check reactions id indexes (if they overlap, or miss some indexes)
   do i=0,MAX_NUMBER_REACTION_TYPE-1
-    if ((type_id_start(i).eq.0).and.(type_id_stop(i).eq.0)) then
-      cycle ! Reaction type not defined
+    if (type_id_stop(i).eq.0) then
+      cycle ! Reaction type not defined (start,stop)=(0,0) or, in a coagulation-only
+            ! network, the empty do-loop range (1,0); both mean "no reaction of this type".
     endif
     
     if ((type_id_start(i).gt.type_id_stop(i))) then

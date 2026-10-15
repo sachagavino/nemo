@@ -1,0 +1,301 @@
+From 5cbab5da5dc374adfe17872e9a1cacb7d86b271f Mon Sep 17 00:00:00 2001
+From: Sacha Gavino <sacha.gavino@gmail.com>
+Date: Sun, 19 Jul 2026 15:32:04 +0000
+Subject: [PATCH 2/3] Write the dust distribution as raw state; add the
+ sigma(a) reduction
+
+src/dust/README.md requires a dust-mass and grain-number conservation
+diagnostic before the first coagulation term is written. This is it.
+
+New dust_distribution.out, written by write_current_dust at every output time
+(created at index=1, appended after), one row per (time, bin):
+  time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H]
+plus three per-time running totals repeated on each row for easy loading:
+  dust_mass[g/H] = sum_k m_k n_k, grain_number[/H] = sum_k n_k, dust_mass_sink.
+
+- n_k is the total grain number of the bin summed over CHARGE STATES
+  (GRAIN0_k + GRAIN0_k-). Grains move between charge states but are not
+  created or destroyed, so the charge-state sum -- not the neutral abundance
+  alone -- is the conserved per-bin number. The neutral abundance by itself
+  drifts as grains charge and discharge.
+- Written as raw state, deliberately not the mass-weighted sigma(a): that
+  reduction is a python script, per project convention.
+- The grain bins stay in abundances.out as well; they are state
+  (abundances(INDGRAIN(k)) = n_k/n_H) and nothing is removed from there.
+
+scripts/dust_distribution.py is the reduction: sigma(a) = m dn/dln a and the
+n(a,t) view, plus the conservation table. dln a is computed per bin from
+neighbours so it also handles a non-uniform tabulated grid.
+
+Verified on the derived + MRN grid: sum_k m_k n_k equals
+initial_dtg_mass_ratio * AMU exactly at t0 and drifts by at most 1.2e-14
+relative across all output times (grain number 9.0e-15) -- floating-point
+round-off from integrating the charge transfer, i.e. zero physical drift, which
+is the acceptance criterion while the distribution is still static. The per-bin
+m_k*n_k column sums to the dust_mass column to 1.2e-15. sigma(a) from the
+reduction follows a^0.5, as MRN requires (m dn/dln a ~ a^3 a^-3.5 a = a^0.5),
+and all output times overlap. tests/roundtrip_derived.sh still passes
+byte-identical after these changes.
+---
+ scripts/dust_distribution.py | 155 +++++++++++++++++++++++++++++++++++
+ src/input_output.f90         |  69 ++++++++++++++++
+ src/main.f90                 |   1 +
+ 3 files changed, 225 insertions(+)
+ create mode 100755 scripts/dust_distribution.py
+
+diff --git a/scripts/dust_distribution.py b/scripts/dust_distribution.py
+new file mode 100755
+index 0000000..ed0df1e
+--- /dev/null
++++ b/scripts/dust_distribution.py
+@@ -0,0 +1,155 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++# Reduction of dust_distribution.out into the two views a human wants to look at:
++#   * sigma(a) = m * dn/dln a   -- the mass-weighted size distribution
++#   * n(a, t)                   -- raw grain number per bin over time
++# plus the dust-mass / grain-number conservation table.
++#
++# NEMO writes dust_distribution.out as RAW STATE (number per bin per H), on
++# purpose: the mass weighting and the per-log-interval density are a reduction,
++# and reductions live here in scripts/, not in the Fortran core. This script is
++# that reduction.
++#
++# Columns of dust_distribution.out (one row per (time, bin)):
++#   time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H]
++#   dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]
++#
++# Usage (key=value args, no spaces; matches the other scripts here):
++#   scripts/dust_distribution.py                      # reads ./dust_distribution.out
++#   scripts/dust_distribution.py file=path/to/out ext=png
++#   scripts/dust_distribution.py times=1,1e3,1e5      # only these output times [yr]
++#
++# Outputs: dust_sigma.<ext>, dust_number.<ext>, and a conservation table to stdout.
++
++import os
++import sys
++import numpy as np
++import matplotlib
++matplotlib.use('Agg')            # headless: write files, never require a display
++import matplotlib.pyplot as plt
++
++INFILE = 'dust_distribution.out'
++EXT = 'pdf'
++WANT_TIMES = None                # None = all output times
++
++HELP = """AIM: reduce dust_distribution.out to sigma(a)=m*dn/dln a and n(a,t),
++and print the dust-mass / grain-number conservation table.
++
++Run in a folder that contains a finished NEMO run (or pass file=...).
++Arguments (key=value, no spaces):
++  file=dust_distribution.out : input file
++  ext=pdf                    : output image extension (pdf, png, ...)
++  times=1,1e3,1e5            : restrict to these output times [yr] (nearest match)
++  help                       : this message
++"""
++
++for arg in sys.argv[1:]:
++    if arg == 'help':
++        print(HELP); sys.exit(0)
++    if '=' not in arg:
++        print("unknown argument '%s'\n%s" % (arg, HELP)); sys.exit(1)
++    key, val = arg.split('=', 1)
++    if key == 'file':
++        INFILE = val
++    elif key == 'ext':
++        EXT = val
++    elif key == 'times':
++        WANT_TIMES = [float(x) for x in val.split(',')]
++    else:
++        print("unknown key '%s'\n%s" % (key, HELP)); sys.exit(1)
++
++if not os.path.exists(INFILE):
++    print("No '%s' here. Run NEMO first, or pass file=... (see 'help')." % INFILE)
++    sys.exit(1)
++
++# --- load -------------------------------------------------------------------
++# columns: 0 time, 1 bin, 2 radius, 3 mass, 4 n_k, 5 m_k*n_k, 6 dust_mass,
++#          7 grain_number, 8 dust_mass_sink
++data = np.loadtxt(INFILE, comments='!')
++if data.ndim == 1:
++    data = data[None, :]
++
++times_all = np.unique(data[:, 0])
++nbin = int(data[:, 1].max())
++
++# reshape into [n_time, n_bin] using the (time, bin) grid
++def grid(col):
++    out = np.empty((times_all.size, nbin))
++    for it, t in enumerate(times_all):
++        rows = data[data[:, 0] == t]
++        rows = rows[np.argsort(rows[:, 1])]     # by bin index
++        out[it, :] = rows[:, col]
++    return out
++
++radius = grid(2)[0, :]          # [cm], time-independent grid
++mass = grid(3)[0, :]            # [g]
++n_kt = grid(4)                  # n_k(t) [/H]           -> the n(a,t) view
++dust_mass = grid(6)[:, 0]       # [g/H] per time (repeated across bins)
++grain_number = grid(7)[:, 0]    # [/H]  per time
++sink = grid(8)[:, 0]            # [g/H] per time
++
++# --- sigma(a) = m * dn/dln a ------------------------------------------------
++# n_k is the NUMBER integrated over bin k; dn/dln a = n_k / (dln a)_k. On the
++# geometric NEMO grid (dln a) is uniform; compute it per bin from neighbours so
++# this also works for a tabulated / non-uniform grid. Base choice (ln here) only
++# rescales sigma by a constant (ln 10 for log10); the shape is what matters.
++lna = np.log(radius)
++dlna = np.empty_like(lna)
++dlna[1:-1] = 0.5 * (lna[2:] - lna[:-2])
++dlna[0] = lna[1] - lna[0]
++dlna[-1] = lna[-1] - lna[-2]
++sigma_kt = n_kt * mass[None, :] / dlna[None, :]     # [g/H per ln a]
++
++# --- which times to draw ----------------------------------------------------
++if WANT_TIMES is None:
++    sel = np.arange(times_all.size)
++else:
++    sel = [int(np.argmin(np.abs(times_all - t))) for t in WANT_TIMES]
++    sel = sorted(set(sel))
++
++# --- plot: sigma(a) ---------------------------------------------------------
++fig, ax = plt.subplots(figsize=(7, 5))
++for it in sel:
++    ax.plot(radius, sigma_kt[it, :], marker='o', ms=3,
++            label='%.3g yr' % times_all[it])
++ax.set_xscale('log'); ax.set_yscale('log')
++ax.set_xlabel(r'grain radius $a$ [cm]')
++ax.set_ylabel(r'$\sigma(a) = m\,\mathrm{d}n/\mathrm{d}\ln a$  [g per H per $\ln a$]')
++ax.set_title(r'Mass-weighted size distribution')
++if len(sel) <= 12:
++    ax.legend(fontsize=8, ncol=2)
++fig.tight_layout()
++fig.savefig('dust_sigma.%s' % EXT)
++print("wrote dust_sigma.%s" % EXT)
++
++# --- plot: n(a, t) ----------------------------------------------------------
++fig, ax = plt.subplots(figsize=(7, 5))
++for it in sel:
++    ax.plot(radius, n_kt[it, :], marker='o', ms=3,
++            label='%.3g yr' % times_all[it])
++ax.set_xscale('log'); ax.set_yscale('log')
++ax.set_xlabel(r'grain radius $a$ [cm]')
++ax.set_ylabel(r'$n_k$ (number per bin, per H)')
++ax.set_title(r'Grain number distribution $n(a,t)$ (raw state)')
++if len(sel) <= 12:
++    ax.legend(fontsize=8, ncol=2)
++fig.tight_layout()
++fig.savefig('dust_number.%s' % EXT)
++print("wrote dust_number.%s" % EXT)
++
++# --- conservation table -----------------------------------------------------
++# This file IS the dust-mass / grain-number conservation diagnostic. Print the
++# drift relative to the first output; with a static distribution it should sit
++# at the floating-point floor.
++dm0, gn0 = dust_mass[0], grain_number[0]
++print("\n%-14s  %-22s  %-22s  %-12s" %
++      ('time[yr]', 'dust_mass[g/H]', 'grain_number[/H]', 'sink[g/H]'))
++for it in range(times_all.size):
++    print("%-14.4e  %-22.15e  %-22.15e  %-12.4e" %
++          (times_all[it], dust_mass[it], grain_number[it], sink[it]))
++print("\nmax |Δ dust_mass|/dust_mass[0]    : %.3e" %
++      (np.max(np.abs(dust_mass - dm0)) / dm0))
++print("max |Δ grain_number|/grain_number[0]: %.3e" %
++      (np.max(np.abs(grain_number - gn0)) / gn0))
++if sink.max() > 1e-3 * dm0:
++    print("WARNING: dust_mass_sink is non-negligible -> a_max is too low.")
+diff --git a/src/input_output.f90 b/src/input_output.f90
+index 55dcb57..8344a11 100644
+--- a/src/input_output.f90
++++ b/src/input_output.f90
+@@ -127,6 +127,75 @@ close(35)
+ return
+ end subroutine write_current_output
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Write the dust size distribution as raw state at the current output.
++!!
++!! One ASCII file, dust_distribution.out, one row per (time, bin), appended at
++!! every output time (created at index=1). This is the dust-mass and grain-number
++!! CONSERVATION diagnostic that src/dust/README.md requires before the first
++!! coagulation term: with a static distribution sum_k m_k n_k must be constant.
++!!
++!! What is written is RAW STATE, deliberately not the mass-weighted sigma(a):
++!!   n_k    = total grain NUMBER density of bin k per H, summed over charge
++!!            states (GRAIN0_k + GRAIN0_k-). Grains only move between charge
++!!            states, they are not created/destroyed, so this total -- not the
++!!            neutral abundance alone -- is the conserved per-bin number.
++!!   m_k    = mass_grid(k) [g], the representative grain mass of the bin.
++!! The reduction to sigma(a) = m*dn/dlog a and the n(a,t) view is a python script
++!! in scripts/ (project convention: reductions live in python, not in the core).
++!!
++!! Columns: time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H], then three
++!! per-time running totals repeated on each row for easy loading:
++!!   dust_mass[g/H] = sum_k m_k n_k, grain_number[/H] = sum_k n_k, dust_mass_sink.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine write_current_dust(index)
++
++use global_variables
++
++implicit none
++
++! Input
++integer, intent(in) :: index !<[in] The reference index of the current output
++
++! Locals
++integer :: k
++real(double_precision) :: n_k, dust_mass_per_h, grain_number_per_h
++real(double_precision), dimension(nb_grains) :: nk_all
++
++! total grain number per bin = neutral + negative charge state (per H)
++dust_mass_per_h    = 0.d0
++grain_number_per_h = 0.d0
++do k=1,nb_grains
++  n_k = abundances(INDGRAIN(k))
++  if (INDGRAIN_MINUS(k).gt.0) n_k = n_k + abundances(INDGRAIN_MINUS(k))
++  nk_all(k)          = n_k
++  dust_mass_per_h    = dust_mass_per_h    + mass_grid(k) * n_k
++  grain_number_per_h = grain_number_per_h + n_k
++enddo
++
++if (index == 1) then
++  open(36, file='dust_distribution.out', status='replace')
++  write(36,'(a)') '! Dust size distribution, raw state, one row per (time, bin).'
++  write(36,'(a)') '! n_k is the total grain number per bin (GRAIN0_k + GRAIN0_k-), per H.'
++  write(36,'(a)') '! sigma(a) = m*dn/dlog a is a reduction (scripts/dust_distribution.py), not stored here.'
++  write(36,'(a)') '! time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H]  &
++                  &dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]'
++else
++  open(36, file='dust_distribution.out', status='old', position='append')
++end if
++
++do k=1,nb_grains
++  write(36,'(es20.10e3,2x,i4,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,&
++            &es22.14e3,2x,es22.14e3,2x,es22.14e3)') &
++    current_time/YEAR, k, grain_radii(k), mass_grid(k), nk_all(k), mass_grid(k)*nk_all(k), &
++    dust_mass_per_h, grain_number_per_h, dust_mass_sink
++enddo
++
++close(36)
++
++return
++end subroutine write_current_dust
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @author 
+ !> Franck Hersant
+diff --git a/src/main.f90 b/src/main.f90
+index af7ef38..bb27de8 100644
+--- a/src/main.f90
++++ b/src/main.f90
+@@ -242,6 +242,7 @@ PROGRAM nmgc
+ 
+       call write_current_rates(index=output_idx)
+       call write_current_output(index=output_idx)
++      call write_current_dust(index=output_idx)
+ 
+       first_step_done = .true.
+     enddo
+-- 
+2.43.0
+

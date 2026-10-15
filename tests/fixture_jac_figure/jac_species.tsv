@@ -1,0 +1,72 @@
+index	name	class	bin	charge
+1	H	gas	0	
+2	C	gas	0	
+3	O	gas	0	
+4	He	gas	0	
+5	OH	gas	0	
+6	CO	gas	0	
+7	H2	gas	0	
+8	H2O	gas	0	
+9	HCO	gas	0	
+10	H2CO	gas	0	
+11	CH3OH	gas	0	
+12	C+	gas	0	
+13	He+	gas	0	
+14	H+	gas	0	
+15	O+	gas	0	
+16	e-	gas	0	
+17	H3+	gas	0	
+18	HCO+	gas	0	
+19	H3O+	gas	0	
+20	GRAIN01	grain	1	0
+21	GRAIN02	grain	2	0
+22	GRAIN03	grain	3	0
+23	GRAIN04	grain	4	0
+24	GRAIN01-	grain	1	-
+25	GRAIN02-	grain	2	-
+26	GRAIN03-	grain	3	-
+27	GRAIN04-	grain	4	-
+28	J01CH2OH	ice	1	
+29	J02CH2OH	ice	2	
+30	J03CH2OH	ice	3	
+31	J04CH2OH	ice	4	
+32	J01CH3OH	ice	1	
+33	J02CH3OH	ice	2	
+34	J03CH3OH	ice	3	
+35	J04CH3OH	ice	4	
+36	J01CO	ice	1	
+37	J02CO	ice	2	
+38	J03CO	ice	3	
+39	J04CO	ice	4	
+40	J01H	ice	1	
+41	J02H	ice	2	
+42	J03H	ice	3	
+43	J04H	ice	4	
+44	J01H2	ice	1	
+45	J02H2	ice	2	
+46	J03H2	ice	3	
+47	J04H2	ice	4	
+48	J01H2CO	ice	1	
+49	J02H2CO	ice	2	
+50	J03H2CO	ice	3	
+51	J04H2CO	ice	4	
+52	J01H2O	ice	1	
+53	J02H2O	ice	2	
+54	J03H2O	ice	3	
+55	J04H2O	ice	4	
+56	J01HCO	ice	1	
+57	J02HCO	ice	2	
+58	J03HCO	ice	3	
+59	J04HCO	ice	4	
+60	J01O	ice	1	
+61	J02O	ice	2	
+62	J03O	ice	3	
+63	J04O	ice	4	
+64	J01OH	ice	1	
+65	J02OH	ice	2	
+66	J03OH	ice	3	
+67	J04OH	ice	4	
+68	J01CH3O	ice	1	
+69	J02CH3O	ice	2	
+70	J03CH3O	ice	3	
+71	J04CH3O	ice	4	

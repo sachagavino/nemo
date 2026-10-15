@@ -194,7 +194,7 @@ subroutine build_symbolic_sparsity()
 use global_variables
 implicit none
 
-integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol
+integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol, d
 integer(kind=8) :: N1
 integer(kind=8), allocatable :: keys(:)
 integer, dimension(MAX_COMPOUNDS) :: reac, comp
@@ -202,6 +202,13 @@ integer :: nreac, ncomp, a, b
 
 no_species = nb_species + 1
 N1 = int(nb_species, 8) + 1_8
+
+! Register declared non-reactant Jacobian couplings (the live-divisor block) before we
+! size the key list. Only active with coagulation: with grains frozen the monolayer
+! divisor is constant, so d(rate)/dY(GRAIN_k) is identically zero and no extra coupling
+! exists. This is the same facility Rung 5 will reuse for the reciprocal GTODN entries.
+NB_DECLARED_JAC_DEPS = 0
+if (coagulation) call build_live_divisor_dependencies()
 
 ! ---- pass 1: upper-bound the number of couplings (duplicates allowed) ----
 ncoup = nb_species                                  ! the diagonal
@@ -215,6 +222,7 @@ do r=1,nb_reactions
   enddo
   ncoup = ncoup + nreac*ncomp
 enddo
+ncoup = ncoup + NB_DECLARED_JAC_DEPS               ! declared non-reactant couplings
 
 allocate(keys(ncoup))
 
@@ -241,6 +249,10 @@ do r=1,nb_reactions
     enddo
   enddo
 enddo
+do d=1,NB_DECLARED_JAC_DEPS                          ! declared non-reactant couplings
+  m = m + 1
+  keys(m) = int(DECLARED_JAC_COL(d),8)*N1 + int(DECLARED_JAC_ROW(d),8)
+enddo
 do irow=1,nb_species                                ! diagonal
   m = m + 1
   keys(m) = int(irow,8)*N1 + int(irow,8)
@@ -255,7 +267,12 @@ if (.not.allocated(JA_SYM)) allocate(JA_SYM(ncoup))
 jj = 0
 c_prev = 0
 do m=1,ncoup
-  if (m.gt.1 .and. keys(m).eq.keys(m-1)) cycle
+  ! NB: Fortran .and. does not short-circuit, so the duplicate test must be nested to
+  ! avoid evaluating keys(m-1) = keys(0) at m=1 (a real OOB that -O2 tolerates but
+  ! -O0/macOS/bounds-checking faults on).
+  if (m.gt.1) then
+    if (keys(m).eq.keys(m-1)) cycle
+  endif
   jcol = int(keys(m)/N1)
   irow = int(keys(m) - int(jcol,8)*N1)
   if (jcol.ne.c_prev) then
@@ -333,6 +350,197 @@ contains
   end subroutine heapsort_i8
 
 end subroutine build_symbolic_sparsity
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief General facility: register a Jacobian coupling (row,col) that does NOT
+!! come from a reaction's reactant/product list, so build_symbolic_sparsity will
+!! include it in the pattern. Duplicates are allowed; they are deduped when the
+!! CSC pattern is built. Out-of-range indices are ignored. Rung 4 uses this for
+!! the live-divisor entries; Rung 5 reuses it for the reciprocal GTODN entries.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine declare_jacobian_dependency(irow, icol)
+use global_variables
+implicit none
+integer, intent(in) :: irow, icol
+integer, allocatable :: tmp(:)
+integer :: cap
+
+if (irow.lt.1 .or. irow.gt.nb_species .or. icol.lt.1 .or. icol.gt.nb_species) return
+
+if (.not.allocated(DECLARED_JAC_ROW)) then
+  allocate(DECLARED_JAC_ROW(64)) ; allocate(DECLARED_JAC_COL(64))
+  NB_DECLARED_JAC_DEPS = 0
+endif
+
+cap = size(DECLARED_JAC_ROW)
+if (NB_DECLARED_JAC_DEPS.ge.cap) then
+  allocate(tmp(2*cap)) ; tmp(1:cap) = DECLARED_JAC_ROW ; call move_alloc(tmp, DECLARED_JAC_ROW)
+  allocate(tmp(2*cap)) ; tmp(1:cap) = DECLARED_JAC_COL ; call move_alloc(tmp, DECLARED_JAC_COL)
+endif
+
+NB_DECLARED_JAC_DEPS = NB_DECLARED_JAC_DEPS + 1
+DECLARED_JAC_ROW(NB_DECLARED_JAC_DEPS) = irow
+DECLARED_JAC_COL(NB_DECLARED_JAC_DEPS) = icol
+
+return
+end subroutine declare_jacobian_dependency
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Rung 4 populator: declare the live-divisor Jacobian couplings. Any
+!! reaction associated with grain bin k (GRAIN_RANK(r)=k) may have a surface rate
+!! that reads the live monolayer divisor SUMLAY(k) = ab_tot(k)/(Y(GRAIN_k0)+Y(GRAIN_k-)),
+!! making its rate depend on both grain charge states. We take the safe superset
+!! (design decision): every compound of every bin-k reaction couples to GRAIN_k0
+!! and GRAIN_k-. This is a strict superset of the true SUMLAY-reading set
+!! (accretion of H/H2 via sticking, photodesorption types 66/67 via the monolayer
+!! cap); extra structural zeros are harmless and robust to later rate changes.
+!! The entries are unconditional on floor state -- the pattern is about which
+!! entries CAN be nonzero, not their value at any given state.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine build_live_divisor_dependencies()
+use global_variables
+implicit none
+integer :: r, s, k, sid
+
+NB_DECLARED_JAC_DEPS = 0
+
+do r=1,nb_reactions
+  k = GRAIN_RANK(r)
+  if (k.lt.1 .or. k.gt.nb_grains) cycle
+  if (INDGRAIN(k).lt.1) cycle
+  do s=1,MAX_COMPOUNDS
+    sid = REACTION_COMPOUNDS_ID(s,r)
+    if (sid.lt.1 .or. sid.gt.nb_species) cycle
+    call declare_jacobian_dependency(sid, INDGRAIN(k))
+    if (INDGRAIN_MINUS(k).ge.1) call declare_jacobian_dependency(sid, INDGRAIN_MINUS(k))
+  enddo
+enddo
+
+return
+end subroutine build_live_divisor_dependencies
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Rung 5 populator: classify the in-scope surface-rate reactions whose
+!! coefficient depends on the grain abundance of their bin, and build the reverse
+!! map species->bin used by get_jacobian to add the analytic
+!! d(rate)/dY(GRAIN_k) = nu*flux/Y_tot entries. GRAIN_k is not a compound of these
+!! reactions, so the reactant differentiator in get_jacobian never produces them;
+!! this map tells get_jacobian which reactions to add for a grain column.
+!!
+!! In-scope classes: accretion (99, nu=+1), Langmuir-Hinshelwood (14, nu=-1,
+!! floored -- the stiff reciprocal), and photodesorption (66/67, nu=+1, floored,
+!! monolayer-cap-gated). The per-reaction derivative value dcoef = d(rate)/dY_tot is
+!! filled at the rate sites in set_dependant_rates, where SUMLAY, the sticking
+!! coefficient, and the floor/cap state are all in scope; this map just records which
+!! reactions are in scope and their bin. The confounders (modified-LH, ER/CIR,
+!! 3-phase) are enforced off by the scope guard in init_gasgrain.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine build_gtodn_jacobian_map()
+use global_variables
+implicit none
+integer :: r, k, t, cnt
+
+if (.not.allocated(grain_col_bin)) allocate(grain_col_bin(nb_species))
+grain_col_bin(1:nb_species) = 0
+do k=1,nb_grains
+  if (INDGRAIN(k).ge.1 .and. INDGRAIN(k).le.nb_species)             grain_col_bin(INDGRAIN(k)) = k
+  if (INDGRAIN_MINUS(k).ge.1 .and. INDGRAIN_MINUS(k).le.nb_species) grain_col_bin(INDGRAIN_MINUS(k)) = k
+enddo
+
+! Per-eval derivative store (filled at the rate sites in set_dependant_rates).
+if (.not.allocated(gtodn_jac_dcoef)) allocate(gtodn_jac_dcoef(nb_reactions))
+gtodn_jac_dcoef(1:nb_reactions) = 0.d0
+
+! Static membership: reactions whose rate coefficient depends on their bin's grain
+! abundance -- accretion (99), Langmuir-Hinshelwood (14), photodesorption (66/67).
+cnt = 0
+do r=1,nb_reactions
+  k = GRAIN_RANK(r)
+  if (k.lt.1 .or. k.gt.nb_grains) cycle
+  if (INDGRAIN(k).lt.1) cycle
+  t = REACTION_TYPE(r)
+  if (t.eq.99 .or. t.eq.14 .or. t.eq.66 .or. t.eq.67) cnt = cnt + 1
+enddo
+
+if (allocated(gtodn_jac_list)) deallocate(gtodn_jac_list)
+allocate(gtodn_jac_list(max(cnt,1)))
+gtodn_jac_n = 0
+do r=1,nb_reactions
+  k = GRAIN_RANK(r)
+  if (k.lt.1 .or. k.gt.nb_grains) cycle
+  if (INDGRAIN(k).lt.1) cycle
+  t = REACTION_TYPE(r)
+  if (t.eq.99 .or. t.eq.14 .or. t.eq.66 .or. t.eq.67) then
+    gtodn_jac_n = gtodn_jac_n + 1
+    gtodn_jac_list(gtodn_jac_n) = r
+  endif
+enddo
+
+return
+end subroutine build_gtodn_jacobian_map
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Rung 4 gate (a): STATIC structural-completeness check. Verify directly
+!! that every live-divisor coupling is present in the finalised symbolic CSC
+!! pattern (IA_SYM/JA_SYM). This is a direct pattern check -- it certifies that
+!! the declared entries survived the sort/dedup/CSC pipeline and the INDGRAIN
+!! indexing, independently of any run. Replaces the retracted byte-identity 4-I.
+!! Fatal if any entry is missing.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine assert_live_divisor_in_pattern()
+use global_variables
+use iso_fortran_env, only: error_unit
+implicit none
+integer :: r, s, k, sid, c, col, p, nchk, nmiss
+logical :: found
+
+if (.not.coagulation) return
+if (sparsity.ne.'symbolic') return
+if (.not.allocated(IA_SYM)) then
+  write(error_unit,*) 'FATAL (gate a): symbolic pattern not built before completeness check.'
+  stop 1
+endif
+
+nchk = 0 ; nmiss = 0
+do r=1,nb_reactions
+  k = GRAIN_RANK(r)
+  if (k.lt.1 .or. k.gt.nb_grains) cycle
+  do s=1,MAX_COMPOUNDS
+    sid = REACTION_COMPOUNDS_ID(s,r)
+    if (sid.lt.1 .or. sid.gt.nb_species) cycle
+    do c=1,2
+      if (c.eq.1) then
+        col = INDGRAIN(k)
+      else
+        col = INDGRAIN_MINUS(k)
+      endif
+      if (col.lt.1) cycle
+      found = .false.
+      do p=IA_SYM(col), IA_SYM(col+1)-1
+        if (JA_SYM(p).eq.sid) then
+          found = .true. ; exit
+        endif
+      enddo
+      nchk = nchk + 1
+      if (.not.found) then
+        nmiss = nmiss + 1
+        if (nmiss.le.10) write(error_unit,'(a,i0,a,i0,a)') &
+          '   missing live-divisor entry (row=', sid, ', col=', col, ')'
+      endif
+    enddo
+  enddo
+enddo
+
+if (nmiss.gt.0) then
+  write(error_unit,'(a,i0,a,i0,a)') 'FATAL (gate a): symbolic pattern missing ', nmiss, &
+    ' of ', nchk, ' live-divisor entries.'
+  stop 1
+endif
+write(*,'(a,i0,a)') ' (gate a) live-divisor structural completeness: PASS (', nchk, &
+  ' entries present in symbolic pattern).'
+
+return
+end subroutine assert_live_divisor_in_pattern
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @brief Debug guard: assert every numerically-nonzero Jacobian entry at the
@@ -452,6 +660,8 @@ integer :: reaction_idx ! The index of a given reaction
 ! Temp values to increase speed
 real(double_precision) :: H_number_density_squared ! H_number_density*H_number_density, to gain speed
 real(double_precision) :: tmp_value ! To optimize speed, temporary variable is created to avoid multiple calculation of the same thing
+real(double_precision) :: w1, w2, w3, w4, w5 ! per-product gain weights (compound slots 4..8); MUST match the RHS weighting
+integer :: k                       ! Rung 5: grain bin of column J (0 if J is not a grain population species)
 
 no_species=nb_species+1 ! Index corresponding to no species (meaning that there is no 3rd reactant for instance
 
@@ -471,6 +681,15 @@ do i=1,nb_reactions_using_species(j)
   product3_idx = REACTION_COMPOUNDS_ID(6, reaction_idx)
   product4_idx = REACTION_COMPOUNDS_ID(7, reaction_idx)
   product5_idx = REACTION_COMPOUNDS_ID(8, reaction_idx)
+
+  ! Same per-product weights as the RHS. The weighted deposit w_p*R*Y_i*Y_j has
+  ! partials w_p*R*Y_j and w_p*R*Y_i, so w_p MUST appear here too; a weight in the
+  ! RHS but not the Jacobian gives a correct derivative value with a wrong Jacobian.
+  w1 = REACTION_PRODUCT_WEIGHTS(4, reaction_idx)
+  w2 = REACTION_PRODUCT_WEIGHTS(5, reaction_idx)
+  w3 = REACTION_PRODUCT_WEIGHTS(6, reaction_idx)
+  w4 = REACTION_PRODUCT_WEIGHTS(7, reaction_idx)
+  w5 = REACTION_PRODUCT_WEIGHTS(8, reaction_idx)
   
   ! if statements are written in a specific order to increase speed. The goal is to test first the most probable event, and 
   !! then always go to 'else' statement, not to test if we have already found our case. One, then two bodies reactions are the most 
@@ -480,11 +699,11 @@ do i=1,nb_reactions_using_species(j)
   if (reactant2_idx.eq.no_species) then
     if (reactant1_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx)
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
     endif
   
@@ -492,22 +711,22 @@ do i=1,nb_reactions_using_species(j)
   else if (reactant3_idx.eq.no_species) then
     if (reactant1_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant2_idx) * actual_gas_density
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
     endif
 
     if (reactant2_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant1_idx) * actual_gas_density
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
     endif
@@ -516,11 +735,11 @@ do i=1,nb_reactions_using_species(j)
   else
     if (reactant1_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant2_idx) * Y(reactant3_idx) * H_number_density_squared
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
       PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
@@ -528,11 +747,11 @@ do i=1,nb_reactions_using_species(j)
 
     if (reactant2_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant1_idx) * Y(reactant3_idx) * H_number_density_squared
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
       PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
@@ -540,11 +759,11 @@ do i=1,nb_reactions_using_species(j)
 
     if (reactant3_idx.eq.J) then 
       tmp_value = reaction_rates(reaction_idx) * Y(reactant1_idx) * Y(reactant2_idx) * H_number_density_squared
-      PDJ2(product1_idx) = PDJ2(product1_idx) + tmp_value
-      PDJ2(product2_idx) = PDJ2(product2_idx) + tmp_value
-      PDJ2(product3_idx) = PDJ2(product3_idx) + tmp_value
-      PDJ2(product4_idx) = PDJ2(product4_idx) + tmp_value
-      PDJ2(product5_idx) = PDJ2(product5_idx) + tmp_value
+      PDJ2(product1_idx) = PDJ2(product1_idx) + w1 * tmp_value
+      PDJ2(product2_idx) = PDJ2(product2_idx) + w2 * tmp_value
+      PDJ2(product3_idx) = PDJ2(product3_idx) + w3 * tmp_value
+      PDJ2(product4_idx) = PDJ2(product4_idx) + w4 * tmp_value
+      PDJ2(product5_idx) = PDJ2(product5_idx) + w5 * tmp_value
       PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
       PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
       PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
@@ -553,6 +772,58 @@ do i=1,nb_reactions_using_species(j)
   endif
 
 enddo
+
+! ---- Rung 5: grain-abundance (dynamic GTODN) Jacobian entries ----
+! When column J is a grain population species (GRAIN_k^0 or GRAIN_k^-), the surface
+! rates of bin k depend on Y_tot(k) = Y(GRAIN_k^0) + Y(GRAIN_k^-) through their rate
+! COEFFICIENT only -- GRAIN_k is not a compound of these reactions, so the reactant
+! loop above never produced these entries. Each in-scope reaction recorded its exact
+! d(rate_coeff)/dY_tot in gtodn_jac_dcoef at its rate site (where SUMLAY, the sticking
+! coefficient, and the floor/cap state are in scope). Here we just multiply by the
+! bilinear factor to get d(flux)/dY_tot and deposit it to products (+w_p) and
+! reactants (-1), exactly as the RHS deposits the flux. Both charge columns are
+! identical because Y_tot depends on each the same way (d Y_tot/d Y0 = d Y_tot/d Y- = 1).
+if (dynamic_gtodn_active() .and. allocated(grain_col_bin)) then
+  k = grain_col_bin(J)
+  if (k.ge.1) then
+    do i=1,gtodn_jac_n
+      reaction_idx = gtodn_jac_list(i)
+      if (GRAIN_RANK(reaction_idx).ne.k) cycle
+      if (gtodn_jac_dcoef(reaction_idx).eq.0.d0) cycle   ! gated off (below floor, cap inactive, rate 0)
+
+      reactant1_idx = REACTION_COMPOUNDS_ID(1, reaction_idx)
+      reactant2_idx = REACTION_COMPOUNDS_ID(2, reaction_idx)
+      reactant3_idx = REACTION_COMPOUNDS_ID(3, reaction_idx)
+      product1_idx  = REACTION_COMPOUNDS_ID(4, reaction_idx)
+      product2_idx  = REACTION_COMPOUNDS_ID(5, reaction_idx)
+      product3_idx  = REACTION_COMPOUNDS_ID(6, reaction_idx)
+      product4_idx  = REACTION_COMPOUNDS_ID(7, reaction_idx)
+      product5_idx  = REACTION_COMPOUNDS_ID(8, reaction_idx)
+      w1 = REACTION_PRODUCT_WEIGHTS(4, reaction_idx)
+      w2 = REACTION_PRODUCT_WEIGHTS(5, reaction_idx)
+      w3 = REACTION_PRODUCT_WEIGHTS(6, reaction_idx)
+      w4 = REACTION_PRODUCT_WEIGHTS(7, reaction_idx)
+      w5 = REACTION_PRODUCT_WEIGHTS(8, reaction_idx)
+
+      ! d(flux)/dY_tot = d(rate_coeff)/dY_tot * (bilinear part), mirroring the RHS
+      ! one- vs two-body flux assembly in get_temporal_derivatives.
+      if (reactant2_idx.eq.no_species) then
+        tmp_value = gtodn_jac_dcoef(reaction_idx) * Y(reactant1_idx)
+      else
+        tmp_value = gtodn_jac_dcoef(reaction_idx) * Y(reactant1_idx) * Y(reactant2_idx) * actual_gas_density
+      endif
+
+      PDJ2(product1_idx)  = PDJ2(product1_idx)  + w1 * tmp_value
+      PDJ2(product2_idx)  = PDJ2(product2_idx)  + w2 * tmp_value
+      PDJ2(product3_idx)  = PDJ2(product3_idx)  + w3 * tmp_value
+      PDJ2(product4_idx)  = PDJ2(product4_idx)  + w4 * tmp_value
+      PDJ2(product5_idx)  = PDJ2(product5_idx)  + w5 * tmp_value
+      PDJ2(reactant1_idx) = PDJ2(reactant1_idx) - tmp_value
+      PDJ2(reactant2_idx) = PDJ2(reactant2_idx) - tmp_value
+      PDJ2(reactant3_idx) = PDJ2(reactant3_idx) - tmp_value
+    enddo
+  endif
+endif
 
 PDJ(1:nb_species)=PDJ2(1:nb_species)
 
@@ -592,10 +863,11 @@ real(double_precision), dimension(nb_species+1) :: YDTMP1,YDTMP2
 integer :: i
 integer :: reactant1_idx, reactant2_idx, reactant3_idx, product1_idx, product2_idx, product3_idx, product4_idx, product5_idx
 real(double_precision) :: rate
+real(double_precision) :: w1, w2, w3, w4, w5 ! per-product gain weights (compound slots 4..8); 1.0 for all chemistry
   character(2) :: c_i
 
 
-call set_dependant_rates(y)
+if (.not. freeze_dependent_rates) call set_dependant_rates(y)
 
 ! do j=1,nb_reactions
 ! write(*,*) reaction_rates(j),j,REACTION_TYPE(j)
@@ -621,6 +893,15 @@ do I=1,nb_reactions
   product4_idx = REACTION_COMPOUNDS_ID(7, i)
   product5_idx = REACTION_COMPOUNDS_ID(8, i)
 
+  ! Per-product gain weights. Default 1.0 (set at init) => bit-identical to the
+  ! unweighted deposit for all chemistry. Coagulation/ice reactions carry the
+  ! Podolak/Brauer redistribution weights here (loss stays unweighted).
+  w1 = REACTION_PRODUCT_WEIGHTS(4, i)
+  w2 = REACTION_PRODUCT_WEIGHTS(5, i)
+  w3 = REACTION_PRODUCT_WEIGHTS(6, i)
+  w4 = REACTION_PRODUCT_WEIGHTS(7, i)
+  w5 = REACTION_PRODUCT_WEIGHTS(8, i)
+
   ! One reactant only
   if (reactant2_idx.eq.no_species) then
     RATE = reaction_rates(I) * Y(reactant1_idx)  
@@ -636,21 +917,21 @@ do I=1,nb_reactions
 
   ! Used to compute the net rate of change in the total surface material
   IF ((REACTION_TYPE(i).ne.40).and.(REACTION_TYPE(i).ne.41)) THEN
-     YD2(product1_idx) = YD2(product1_idx) + RATE
-     YD2(product2_idx) = YD2(product2_idx) + RATE
-     YD2(product3_idx) = YD2(product3_idx) + RATE
-     YD2(product4_idx) = YD2(product4_idx) + RATE
-     YD2(product5_idx) = YD2(product5_idx) + RATE
+     YD2(product1_idx) = YD2(product1_idx) + w1 * RATE
+     YD2(product2_idx) = YD2(product2_idx) + w2 * RATE
+     YD2(product3_idx) = YD2(product3_idx) + w3 * RATE
+     YD2(product4_idx) = YD2(product4_idx) + w4 * RATE
+     YD2(product5_idx) = YD2(product5_idx) + w5 * RATE
 
      YD2(reactant1_idx) = YD2(reactant1_idx) - RATE
      YD2(reactant2_idx) = YD2(reactant2_idx) - RATE
      YD2(reactant3_idx) = YD2(reactant3_idx) - RATE
 
-     YDTMP1(product1_idx) = YDTMP1(product1_idx) + RATE
-     YDTMP1(product2_idx) = YDTMP1(product2_idx) + RATE
-     YDTMP1(product3_idx) = YDTMP1(product3_idx) + RATE
-     YDTMP1(product4_idx) = YDTMP1(product4_idx) + RATE
-     YDTMP1(product5_idx) = YDTMP1(product5_idx) + RATE
+     YDTMP1(product1_idx) = YDTMP1(product1_idx) + w1 * RATE
+     YDTMP1(product2_idx) = YDTMP1(product2_idx) + w2 * RATE
+     YDTMP1(product3_idx) = YDTMP1(product3_idx) + w3 * RATE
+     YDTMP1(product4_idx) = YDTMP1(product4_idx) + w4 * RATE
+     YDTMP1(product5_idx) = YDTMP1(product5_idx) + w5 * RATE
 
      YDTMP2(reactant1_idx) = YDTMP2(reactant1_idx) - RATE
      YDTMP2(reactant2_idx) = YDTMP2(reactant2_idx) - RATE
@@ -678,7 +959,7 @@ ENDDO
 
 rate_tot(:) = rate_tot_acc(:) + rate_tot_des(:)
 
-call set_dependant_rates_3phase(Y)
+if (.not. freeze_dependent_rates) call set_dependant_rates_3phase(Y)
 
 do i=type_id_start(40),type_id_stop(40)
   reactant1_idx = REACTION_COMPOUNDS_ID(1, i)
@@ -751,14 +1032,19 @@ end subroutine get_temporal_derivatives
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
   subroutine set_constant_rates()
 
-  use global_variables 
-  
+  use global_variables
+  use iso_fortran_env, only: error_unit
+
   implicit none
 
   ! Locals
   real(double_precision) :: T300, TI, TSQ
   integer :: nsta, nfin
   integer :: i,k, j, w, m, n, ic_i
+  ! --- grain-charging Coulomb/image focusing (Draine & Sutin 1987) ---
+  real(double_precision), parameter :: E_ESU2 = 4.80320471d-10 * 4.80320471d-10  ! e^2 [esu^2, cgs]
+  real(double_precision) :: tau_k, focus_factor
+  integer :: ipart
   integer, dimension(10) :: indice
   real(double_precision), dimension(10) :: distmin, distmax
   real(double_precision) :: activ,grain_radius_factor
@@ -789,7 +1075,32 @@ end subroutine get_temporal_derivatives
   do J=type_id_start(0),type_id_stop(0)
     grain_radius_factor = grain_radii(GRAIN_RANK(J))*grain_radii(GRAIN_RANK(J)) / (1.E-5*1.E-5)
     reaction_rates(J)  = grain_radius_factor * RATE_A(J) * (T300**RATE_B(J))
-    
+
+    ! Coulomb/image focusing of the geometric charging rate (Draine & Sutin 1987),
+    ! singly-charged projectiles only. Default off -> rates unchanged bit for bit.
+    if (charging_focusing.eq.1) then
+      ! reduced temperature of this grain bin: tau = a_k k_B T_gas / e^2
+      tau_k = grain_radii(GRAIN_RANK(J)) * K_B * actual_gas_temp / E_ESU2
+      ! the projectile is the non-grain reactant: e- (INDEL) or a singly-charged cation
+      if (reactant_1_idx(J).eq.INDEL .or. SPECIES_CHARGE(reactant_1_idx(J)).eq.1) then
+        ipart = reactant_1_idx(J)
+      else
+        ipart = reactant_2_idx(J)
+      endif
+      if (ipart.eq.INDEL) then
+        ! electron onto a neutral grain: factor = s_e * (1 + sqrt(pi/(2 tau)))
+        focus_factor = electron_sticking * (1.d0 + sqrt(PI / (2.d0*tau_k)))
+      else if (SPECIES_CHARGE(ipart).eq.1) then
+        ! singly-charged cation onto a negative grain: (1 + 1/tau)(1 + sqrt(2/(tau+2)))
+        focus_factor = (1.d0 + 1.d0/tau_k) * (1.d0 + sqrt(2.d0/(tau_k + 2.d0)))
+      else
+        write(error_unit,*) 'FATAL (set_constant_rates): charging_focusing = 1 but type-0 reaction ', J, &
+          ' is neither (neutral grain + e-) nor (negative grain + singly-charged cation).'
+        call exit(32)
+      endif
+      reaction_rates(J) = reaction_rates(J) * focus_factor
+    endif
+
 !     write(*,*)reaction_rates(J), grain_radii(GRAIN_RANK(J)),GRAIN_RANK(J) ,j
   enddo
   
@@ -1211,6 +1522,12 @@ end subroutine get_temporal_derivatives
   REAL(double_precision) :: PROBH2H2 ! probability for the encounter desorption process.
   REAL(double_precision) :: TETABIS,TETABIS1,TETABIS2,TETABIS3
   REAL(double_precision) :: T300, TI, TSQ
+  REAL(double_precision) :: gtodn_i !< 4c: per-bin 1/n_grain for the monolayer count (live+floored when coag on, frozen GTODN when off)
+  LOGICAL :: dyn_gtodn !< Rung 5: dynamic surface-rate GTODN active (coag on, or force-dynamic override). Evaluated once per call.
+  REAL(double_precision) :: gtodn_lh !< Rung 5: live (floored) or frozen 1/n_grain used at the Langmuir-Hinshelwood rate site
+  REAL(double_precision) :: stick_slog !< Rung 5: d(ln stick)/d(SUMLAY) for the current H/H2 accretion reaction (0 otherwise)
+  REAL(double_precision) :: Ytot_k, floor_k !< Rung 5: per-reaction total grain abundance of its bin and the per-H floor
+  REAL(double_precision), allocatable, dimension(:) :: dsumlay_dYtot !< Rung 5: d(SUMLAY(k))/dY_tot(k); nonzero only where SUMLAY is live (coag on) and above floor
   REAL(double_precision) :: YMOD1, YMOD2
   INTEGER :: IMOD1 !< modify rate flag for reactant 1
   INTEGER :: IMOD2 !< modify rate flag for reactant 2 
@@ -1261,6 +1578,19 @@ end subroutine get_temporal_derivatives
   CHARACTER(len=2)::c_i
 
 
+
+! Rung 5: evaluate the dynamic-GTODN gate once per call (single source of truth,
+! not re-tested per reaction). When true, the accretion and LH rate sites read the
+! instantaneous grain abundance; when false they read the frozen GTODN array and
+! the coag-off path stays bit-identical to nmgc-2.0.
+dyn_gtodn = dynamic_gtodn_active()
+
+! Rung 5: reset the per-reaction grain-abundance derivative store for this evaluation;
+! each in-scope rate site fills its entry below. Also prepare the per-bin
+! d(SUMLAY)/dY_tot used by the photodesorption and H/H2-sticking derivatives.
+if (dyn_gtodn .and. allocated(gtodn_jac_dcoef)) gtodn_jac_dcoef(1:nb_reactions) = 0.d0
+allocate(dsumlay_dYtot(nb_grains))
+dsumlay_dYtot(1:nb_grains) = 0.d0
 
 allocate(ab_tot(nb_grains))
 ab_tot(1:nb_grains) = 0.d0
@@ -1324,7 +1654,11 @@ abCO(1:nb_grains) = 0.d0
 !   do J=1,nb_species
 !       ACC_RATES_PREFACTOR(J)=COND*STICK_SPEC(J)/SQRT(SPECIES_MASS(J))
 !   ENDDO
-  do j=1,nb_reactions
+  ! Accretion prefactors are a gas-phase-accretion quantity; coagulation reactions
+  ! never use them (their kernel is on reaction_rates), and their reactant_1_idx is
+  ! deliberately unset, so restrict this to the chemistry block (== nb_reactions when
+  ! coagulation is off).
+  do j=1,nb_chemistry_reactions
     ACC_RATES_PREFACTOR(J) = COND(j)*STICK_SPEC(reactant_1_idx(J))/SQRT(SPECIES_MASS(reactant_1_idx(J)))
 !   write(298,*)J,ACC_RATES_PREFACTOR(J),STICK_SPEC(reactant_1_idx(J)),reactant_1_idx(J),species_name(reactant_1_idx(J))
   enddo  
@@ -1366,9 +1700,28 @@ abCO(1:nb_grains) = 0.d0
   MLAY = 2.d0
   
   do i=1,nb_grains
-    SUMLAY(i)     =  ab_tot(i)*GTODN(i)/nb_sites_per_grain(i)
-    sumlaysurf(i) = ab_surf(i)*GTODN(i)/nb_sites_per_grain(i)
-    sumlaymant(i) = ab_mant(i)*GTODN(i)/nb_sites_per_grain(i)
+    ! 4c (partial coupling): the monolayer COUNT (ice loading) uses the LIVE total grain
+    ! number when coagulation is on -- summed over BOTH charge states and floored so
+    ! 1/n_grain stays finite as coagulation drains a bin. With coagulation off the total
+    ! grain number is conserved (charging only moves grains between charge states), so the
+    ! frozen GTODN(i)=1/Y_total,init IS the live value: use it, keeping coag-off runs
+    ! bit-identical to nmgc-2.0 (equivalence.sh). ab_lay and every surface-RATE GTODN
+    ! stay frozen -- only this counting site goes live (Rung 3; full dynamic GTODN is Rung 5).
+    if (coagulation) then
+      gtodn_i = 1.d0 / max(Y(INDGRAIN(i)) + Y(INDGRAIN_MINUS(i)), grain_abundance_floor / H_number_density)
+    else
+      gtodn_i = GTODN(i)
+    endif
+    SUMLAY(i)     =  ab_tot(i) *gtodn_i/nb_sites_per_grain(i)
+    sumlaysurf(i) = ab_surf(i)*gtodn_i/nb_sites_per_grain(i)
+    sumlaymant(i) = ab_mant(i)*gtodn_i/nb_sites_per_grain(i)
+    ! Rung 5: SUMLAY(i) = ab_tot(i)/(nb_sites * max(Y_tot,floor)) depends on the grain
+    ! abundance ONLY where it is live (coagulation on) and above the floor; there
+    ! d(SUMLAY)/dY_tot = -SUMLAY/Y_tot. This feeds the photodesorption-cap and
+    ! H/H2-sticking grain-derivatives. Frozen SUMLAY (coag off) has zero derivative.
+    if (coagulation .and. (Y(INDGRAIN(i))+Y(INDGRAIN_MINUS(i))) .gt. grain_abundance_floor/H_number_density) then
+      dsumlay_dYtot(i) = -SUMLAY(i) / (Y(INDGRAIN(i)) + Y(INDGRAIN_MINUS(i)))
+    endif
   enddo    
   
   UVCR = 1.300d-17 / CR_IONISATION_RATE
@@ -1621,17 +1974,13 @@ abCO(1:nb_grains) = 0.d0
   !-------------------------------------------------------------
 
   do J=type_id_start(99),type_id_stop(99)
-!       write(199,*)J,reaction_rates(J)
-! write(399,*)J, ACCRETION_RATES(reactant_1_idx(J))
     ! ========= Set accretion rates
+    stick_slog = 0.d0   ! Rung 5: d(ln stick)/d(SUMLAY); nonzero only for the H/H2 sticking special case
     if((species_name(reactant_1_idx(J)).eq.YH).or.(species_name(reactant_1_idx(J)).eq.YH2)) then
       SUMLAY_grain=SUMLAY(GRAIN_RANK(J))
-      call sticking_special_cases(j,SUMLAY_grain)
+      call sticking_special_cases(j,SUMLAY_grain,stick_slog)
     endif   
     ACCRETION_RATES(reactant_1_idx(J)) = ACC_RATES_PREFACTOR(J) * TSQ * Y(reactant_1_idx(J)) * actual_gas_density
-    
-!write(398,*)J,ACCRETION_RATES(reactant_1_idx(J)),ACC_RATES_PREFACTOR(reactant_1_idx(J)),TSQ,Y(reactant_1_idx(J)),actual_gas_density
-! write(397,*)reactant_1_idx(J),species_name(reactant_1_idx(J))
     ! When Eley-Rideal and complex induced reaction are activated we must be carreful on how accretions rate are computed
     IF(is_er_cir.ne.0) THEN
 
@@ -1671,8 +2020,24 @@ abCO(1:nb_grains) = 0.d0
     ! in the case of ITYPE 99, reactant_2_idx(J) is not the second reactant of the reaction but the result of the 
     ! adsorption
     ACCRETION_RATES(reactant_2_idx(J)) = ACCRETION_RATES(reactant_1_idx(J))
-    reaction_rates(J) = RATE_A(J) * branching_ratio(J) * ACCRETION_RATES(reactant_1_idx(J)) / Y(reactant_1_idx(J)) &
-    / GTODN(GRAIN_RANK(J))
+    ! Rung 5: accretion rate coefficient ~ 1/GTODN = Y_tot (more grains => more
+    ! surface => faster accretion): the linear class, no floor. The dynamic branch
+    ! multiplies by the live Y_tot directly rather than dividing by 1/Y_tot, so it
+    ! stays finite as a bin empties. The frozen branch is byte-identical to before.
+    if (dyn_gtodn) then
+      reaction_rates(J) = RATE_A(J) * branching_ratio(J) * ACCRETION_RATES(reactant_1_idx(J)) / Y(reactant_1_idx(J)) &
+      * (Y(INDGRAIN(GRAIN_RANK(J))) + Y(INDGRAIN_MINUS(GRAIN_RANK(J))))
+      ! Rung 5: d(rate)/dY_tot. Coefficient ~ Y_tot * stick(SUMLAY(Y_tot)); the second
+      ! factor matters only for H/H2 (stick_slog/=0). d(rate)/dY_tot
+      ! = rate*(1/Y_tot + stick_slog*d(SUMLAY)/dY_tot).
+      Ytot_k = Y(INDGRAIN(GRAIN_RANK(J))) + Y(INDGRAIN_MINUS(GRAIN_RANK(J)))
+      if (Ytot_k .gt. 0.d0) then
+        gtodn_jac_dcoef(J) = reaction_rates(J) * (1.d0/Ytot_k + stick_slog * dsumlay_dYtot(GRAIN_RANK(J)))
+      endif
+    else
+      reaction_rates(J) = RATE_A(J) * branching_ratio(J) * ACCRETION_RATES(reactant_1_idx(J)) / Y(reactant_1_idx(J)) &
+      / GTODN(GRAIN_RANK(J))
+    endif
     
     
 !     write(499,*)J, branching_ratio(J) , ACCRETION_RATES(reactant_1_idx(J)),Y(reactant_1_idx(J)) , GTODN(GRAIN_RANK(J)) 
@@ -1695,6 +2060,16 @@ abCO(1:nb_grains) = 0.d0
           !     the upper layers can photodesorb: this is done by assigning a reducing factor to the rate coefficient
           if(SUMLAY(GRAIN_RANK(J)).GE.MLAY) reaction_rates(J) = reaction_rates(J) * MLAY / SUMLAY(GRAIN_RANK(J))
           if (is_photodesorb.Eq.0) reaction_rates(J) = 0.D0
+          ! Rung 5: d(rate)/dY_tot. Only the capped branch depends on the grain abundance
+          ! (rate ~ MLAY/SUMLAY ~ Y_tot); uncapped or photodesorb-off => 0. Uses the final
+          ! (possibly zeroed) reaction_rates so it vanishes when photodesorption is off.
+          if (dyn_gtodn) then
+            if (SUMLAY(GRAIN_RANK(J)).GE.MLAY) then
+              gtodn_jac_dcoef(J) = -(reaction_rates(J)/SUMLAY(GRAIN_RANK(J)))*dsumlay_dYtot(GRAIN_RANK(J))
+            else
+              gtodn_jac_dcoef(J) = 0.d0
+            endif
+          endif
           EVAPORATION_RATES_TEMPO(reactant_1_idx(J))=EVAPORATION_RATES(reactant_1_idx(J))+reaction_rates(J)
           IF (species_name(reactant_1_idx(J))(4:11) .EQ. 'H2      ' .AND. species_name(reactant_1_idx(J))(1:1) .EQ. 'J') THEN
             EVAPORATION_RATES_TEMPO_H2(GRAIN_RANK(J))=EVAPORATION_RATES_H2(GRAIN_RANK(J))+reaction_rates(J)
@@ -1716,6 +2091,14 @@ abCO(1:nb_grains) = 0.d0
           !     the upper layers can photodesorb: this is done by assigning a reducing factor to the rate coefficient
           if(SUMLAY(GRAIN_RANK(J)).GE.MLAY) reaction_rates(J) = reaction_rates(J) * MLAY / SUMLAY(GRAIN_RANK(J))
           if (is_photodesorb.Eq.0) reaction_rates(J) = 0.D0
+          ! Rung 5: d(rate)/dY_tot (see type-66 block above for the derivation).
+          if (dyn_gtodn) then
+            if (SUMLAY(GRAIN_RANK(J)).GE.MLAY) then
+              gtodn_jac_dcoef(J) = -(reaction_rates(J)/SUMLAY(GRAIN_RANK(J)))*dsumlay_dYtot(GRAIN_RANK(J))
+            else
+              gtodn_jac_dcoef(J) = 0.d0
+            endif
+          endif
           EVAPORATION_RATES_TEMPO(reactant_1_idx(J))=EVAPORATION_RATES_TEMPO(reactant_1_idx(J))+reaction_rates(J)
         IF (species_name(reactant_1_idx(J))(4:11) .EQ. 'H2      ' .AND. species_name(reactant_1_idx(J))(1:1) .EQ. 'J') THEN
           EVAPORATION_RATES_TEMPO_H2(GRAIN_RANK(J))=EVAPORATION_RATES_H2(GRAIN_RANK(J))+1.D30*reaction_rates(J)
@@ -1861,12 +2244,38 @@ abCO(1:nb_grains) = 0.d0
 
     DIFF = DIFFUSION_RATE_1(J) + DIFFUSION_RATE_2(J)
 
-    reaction_rates(J) = RATE_A(J) * branching_ratio(J) * BARR * DIFF * GTODN(GRAIN_RANK(J)) / actual_gas_density
+    ! Rung 5: LH coefficient ~ GTODN = 1/Y_tot (fixed per-H ice spread over more
+    ! grains dilutes the two-species encounter rate): the stiff reciprocal class,
+    ! floored. gtodn_lh is the live floored 1/Y_tot when dynamic, else the frozen
+    ! GTODN array (byte-identical to before). Same floor as the Rung 3 monolayer
+    ! divisor (grain_abundance_floor / H_number_density), one shared value.
+    if (dyn_gtodn) then
+      gtodn_lh = 1.d0 / max(Y(INDGRAIN(GRAIN_RANK(J))) + Y(INDGRAIN_MINUS(GRAIN_RANK(J))), &
+                            grain_abundance_floor / H_number_density)
+    else
+      gtodn_lh = GTODN(GRAIN_RANK(J))
+    endif
+    reaction_rates(J) = RATE_A(J) * branching_ratio(J) * BARR * DIFF * gtodn_lh / actual_gas_density
+    ! Rung 5: d(rate)/dY_tot. Coefficient ~ 1/max(Y_tot,floor); above the floor
+    ! d(rate)/dY_tot = -rate/Y_tot, and it is exactly zero at/below the floor.
+    if (dyn_gtodn) then
+      Ytot_k = Y(INDGRAIN(GRAIN_RANK(J))) + Y(INDGRAIN_MINUS(GRAIN_RANK(J)))
+      floor_k = grain_abundance_floor / H_number_density
+      if (Ytot_k .gt. floor_k) then
+        gtodn_jac_dcoef(J) = -reaction_rates(J) / Ytot_k
+      else
+        gtodn_jac_dcoef(J) = 0.d0
+      endif
+    endif
     
     ! If the number of mantle layer is > 1, we consider that t(diff) (the time required by a species to 
     ! scan the entire grain sites) is given by the Number of sites on a layer time the number of layer time t(hop)
     IF(HAS_MANTLE_COMPOUND(J).AND.sumlaymant(GRAIN_RANK(J)).gt.1.0d0) THEN
       reaction_rates(J) = reaction_rates(J) / sumlaymant(GRAIN_RANK(J))
+      ! Rung 5: with the mantle-multilayer factor, rate ~ (1/Y_tot)*(1/sumlaymant) and
+      ! sumlaymant ~ 1/Y_tot (live), so the two Y_tot dependences cancel: d(rate)/dY_tot = 0.
+      ! (v1 has no mantle species, so this branch never fires; kept for FD-consistency.)
+      if (dyn_gtodn) gtodn_jac_dcoef(J) = 0.d0
     ENDIF
 
     ! H2 formation by LH mechanism is turned off when the ad hoc formation of H2
@@ -2106,7 +2515,7 @@ end subroutine set_dependant_rates_3phase
 !!\n url: http://cdsads.u-strasbg.fr/abs/2012A%26A...538A.128C
 !!\n A smooth transition between bare grains and ices is computed
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-subroutine sticking_special_cases(J,SUMLAY_grain)
+subroutine sticking_special_cases(J,SUMLAY_grain,dlnstick_dsumlay)
 
 use global_variables
 
@@ -2115,6 +2524,7 @@ implicit none
 ! Inputs
 integer, intent(in) :: J !<[in] index of a given reaction
 real(double_precision), intent(in) :: SUMLAY_grain
+real(double_precision), intent(out) :: dlnstick_dsumlay !< Rung 5: d(ln stick)/d(SUMLAY); 0 above 1 ML
 
 ! Local
 real(double_precision) :: CONSD
@@ -2143,6 +2553,15 @@ if(SUMLAY_grain.le.1.0d+00) then
 else
 ! When the grain coverage is more than 1 ML we use the "ASW ice" expression
   stick = stick_ice
+endif
+
+! Rung 5: sensitivity of the sticking coefficient to the monolayer coverage, needed for
+! the H/H2 accretion grain-abundance derivative (SUMLAY is live in Y_tot when coag on).
+! Below 1 ML d(stick)/d(SUMLAY) = stick_ice - stick_bare; above 1 ML stick is flat.
+if(SUMLAY_grain.le.1.0d+00) then
+  dlnstick_dsumlay = (stick_ice - stick_bare) / stick
+else
+  dlnstick_dsumlay = 0.d0
 endif
 
 ACC_RATES_PREFACTOR(J) = CONSD*STICK/SQRT(SPECIES_MASS(reactant_1_idx(J)))

@@ -1,0 +1,64 @@
+From fbb19d90a368acc5f5b5e049a28b2ea10d8aa0f0 Mon Sep 17 00:00:00 2001
+From: NEMO Rung5 <nemo-dev@localhost>
+Date: Thu, 17 Sep 2026 13:40:05 +0000
+Subject: [PATCH 3/4] Rung 5c: add 021-vs-121 convergence harness
+ (reproducibility)
+
+Runs the production analytic path (121, MOSS=1 auto-probed structure) against
+021 (MOSS=0 symbolic structure) and 022 (MOSS=0 FD structure) in a bin-depleting
+coagulation regime, reporting DLSODES step statistics (NST/NFE/NJE), solver
+restarts, wall time, and cross-mf final-state agreement.
+
+This is the reproducibility artifact for two Rung-5c claims:
+ - 121 and 021 tie on measured convergence and give bit-identical results
+   (both are MITER=1 analytic get_jacobian; the earlier "121 = FD values"
+   characterization was wrong -- FD is 022, which here is ~50x slower with a
+   convergence failure);
+ - the analytic-Jacobian payoff was therefore always in production under 121;
+   Rung 5 was an analytic-completeness milestone, not a convergence speedup.
+---
+ tests/rung5c_convergence.sh | 32 ++++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+ create mode 100755 tests/rung5c_convergence.sh
+
+diff --git a/tests/rung5c_convergence.sh b/tests/rung5c_convergence.sh
+new file mode 100755
+index 0000000..9480efd
+--- /dev/null
++++ b/tests/rung5c_convergence.sh
+@@ -0,0 +1,32 @@
++#!/usr/bin/env bash
++# Rung 5c: 021-vs-121 (and 022 for mechanism) convergence/step-stat comparison in a
++# bin-depleting coagulation regime. Read-only wrt src. Usage: rung5c_convergence.sh K0 STOP NB
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++K0="${1:-1.000E-10}"; STOP="${2:-1.000E+07}"; NB="${3:-30}"
++make OPT=-O0 >/tmp/5c_b.log 2>&1 || { echo build FAIL; tail -20 /tmp/5c_b.log; exit 3; }
++R="$(mktemp -d)"; trap 'rm -rf "$R"' EXIT
++cp networks/reduced_CHO/*.in "$R"/; cp inputs/element.in "$R"/
++sed -e 's/^coagulation = .*/coagulation = 1/' \
++    -e "s/^constant_kernel_k0 = .*/constant_kernel_k0 = ${K0}/" \
++    -e "s/^stop_time = .*/stop_time = ${STOP}/" \
++    -e "s/^nb_outputs = .*/nb_outputs = ${NB}/" \
++    tests/fixture_rung3/parameters.in | sed 's/^sparsity = .*/sparsity = symbolic/' > "$R"/parameters.in
++echo "regime: K0=${K0}  stop_time=${STOP} yr  nb_outputs=${NB}"
++printf '%-6s %10s %10s %8s %8s %10s %14s\n' mf NST NFE NJE fails wall_s bin1_final
++for MF in 121 21 22; do
++  ( cd "$R" && t0=$(date +%s.%N); NEMO_ORACLE_MF=$MF "$ROOT/bin/nmgc" run > run_$MF.log 2>&1; t1=$(date +%s.%N); echo "$t1 $t0" > .t )
++  nst=$(grep -E 'NST' "$R"/run_$MF.log | grep -oE '[0-9]+$'); nfe=$(grep -E 'NFE' "$R"/run_$MF.log | grep -oE '[0-9]+$')
++  nje=$(grep -E 'NJE' "$R"/run_$MF.log | grep -oE '[0-9]+$'); fails=$(grep -E 'restarts' "$R"/run_$MF.log | grep -oE '[0-9]+$')
++  wall=$(awk '{printf "%.3f", $1-$2}' "$R"/.t)
++  b1=$(awk '$2==1{v=$5} END{printf "%.4e", v}' "$R"/dust_distribution.out)
++  cp "$R"/abundances.out "$R"/ab_$MF.out
++  printf '%-6s %10s %10s %8s %8s %10s %14s\n' "$MF" "$nst" "$nfe" "$nje" "$fails" "$wall" "$b1"
++done
++# cross-mf final-state agreement (max rel diff on final abundances row)
++echo "--- final-state agreement (max rel diff, last abundances row) ---"
++for PAIR in "21 121" "22 21"; do set -- $PAIR
++  md=$(paste <(tail -1 "$R"/ab_$1.out | tr -s ' ' '\n') <(tail -1 "$R"/ab_$2.out | tr -s ' ' '\n') \
++      | awk 'NF==2 && $1+0==$1 {a=$1;b=$2; d=(a-b); m=(a<0?-a:a); n=(b<0?-b:b); base=(m>n?m:n); if(base>1e-30){r=(d<0?-d:d)/base; if(r>mx)mx=r}} END{printf "%.3e", mx}')
++  echo "  mf=$1 vs mf=$2 : max rel diff = $md"
++done
+-- 
+2.43.0
+

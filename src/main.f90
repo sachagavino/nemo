@@ -46,6 +46,7 @@ PROGRAM nmgc
   use global_variables
   use iso_fortran_env
   use shielding
+  use dust_evolution
   use utilities
   use gasgrain
   use outputs
@@ -57,7 +58,7 @@ PROGRAM nmgc
   integer :: itask = 1 !< ITASK = 1 for normal computation of output values of Y at t = TOUT.
   integer :: istate = 1 !< ISTATE = integer flag (input and output). Set ISTATE = 1.
   integer :: iopt = 1 !< IOPT = 1 to indicate optional inputs are used.
-  integer :: mf = 121 !< method flag. 121: stiff (BDF) method, user-supplied sparse Jacobian
+  integer :: mf !< DLSODES method flag; set by solver_method_flag() after init (coag-on+symbolic -> 021 analytic; coag-off or numerical -> 121; both MITER=1. FD-complete 022 only via NEMO_ORACLE_MF)
   real(double_precision) :: atol = 1.d-99 !< absolute tolerance parameter
 
   real(double_precision) :: output_timestep !< Timestep to reach the next output time [s]
@@ -68,6 +69,12 @@ PROGRAM nmgc
 
   real(double_precision) :: code_start_time, code_current_time, code_elapsed_time
   real(double_precision) :: remaining_time !< estimated remaining time [s]
+
+  ! Rung 4 solver characterization (4-IV cost + convergence effort): accumulated across all DLSODES calls.
+  integer(kind=8) :: tot_nst = 0  !< total accepted steps (IWORK(11))
+  integer(kind=8) :: tot_nfe = 0  !< total RHS evaluations (IWORK(12))
+  integer(kind=8) :: tot_nje = 0  !< total Jacobian evals / LU decompositions (IWORK(13))
+  integer(kind=8) :: tot_fail = 0 !< number of DLSODES calls returning istate /= 2
 
   integer :: i, ic_i !< For loops
   character(2) :: c_i !< to convert the grain rank encoded in a species name into an integer
@@ -92,6 +99,9 @@ PROGRAM nmgc
     call write_banner()
 
     call init_gasgrain()
+
+    ! Select the DLSODES method flag now that the coagulation switch is known.
+    mf = solver_method_flag()
 
     call initialize_work_arrays()
 
@@ -148,26 +158,34 @@ PROGRAM nmgc
         ENDIF
       ENDDO
 
-      ! Column densities of the self-shielded species, from Av
-      NH    = actual_av/AV_NH_ratio * abundances(indH)
-      NH2   = actual_av/AV_NH_ratio * abundances(indH2)
-      NN2   = actual_av/AV_NH_ratio * abundances(indN2)
-      NCO   = actual_av/AV_NH_ratio * abundances(indCO)
-      NH2O  = actual_av/AV_NH_ratio * abundances(indH2O)
-      NCH   = actual_av/AV_NH_ratio * abundances(indCH)
-      NCH3  = actual_av/AV_NH_ratio * abundances(indCH3)
-      NH2CO = actual_av/AV_NH_ratio * abundances(indH2CO)
-      NCO2  = actual_av/AV_NH_ratio * abundances(indCO2)
-      NN2O  = actual_av/AV_NH_ratio * abundances(indN2O)
-      NCH4  = actual_av/AV_NH_ratio * abundances(indCH4)
-      NOH   = actual_av/AV_NH_ratio * abundances(indOH)
-      NHCO  = actual_av/AV_NH_ratio * abundances(indHCO)
-      NCN   = actual_av/AV_NH_ratio * abundances(indCN)
-      NHCN  = actual_av/AV_NH_ratio * abundances(indHCN)
-      NHNC  = actual_av/AV_NH_ratio * abundances(indHNC)
-      NNH   = actual_av/AV_NH_ratio * abundances(indNH)
-      NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
-      NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
+      ! Column densities of the self-shielded species, from Av. Each is only used
+      ! by the corresponding H2/CO/N2 self-shielding rate code, which is absent when
+      ! those reactions are not in the network (e.g. the dust-only coagulation
+      ! fixture). Guard on a resolved index so a species missing from a reduced
+      ! network does not index abundances(0); byte-identical for any full network,
+      ! where every index is positive.
+      NH=0.d0; NH2=0.d0; NN2=0.d0; NCO=0.d0; NH2O=0.d0; NCH=0.d0; NCH3=0.d0
+      NH2CO=0.d0; NCO2=0.d0; NN2O=0.d0; NCH4=0.d0; NOH=0.d0; NHCO=0.d0; NCN=0.d0
+      NHCN=0.d0; NHNC=0.d0; NNH=0.d0; NNH2=0.d0; NNH3=0.d0
+      if (indH   >0) NH    = actual_av/AV_NH_ratio * abundances(indH)
+      if (indH2  >0) NH2   = actual_av/AV_NH_ratio * abundances(indH2)
+      if (indN2  >0) NN2   = actual_av/AV_NH_ratio * abundances(indN2)
+      if (indCO  >0) NCO   = actual_av/AV_NH_ratio * abundances(indCO)
+      if (indH2O >0) NH2O  = actual_av/AV_NH_ratio * abundances(indH2O)
+      if (indCH  >0) NCH   = actual_av/AV_NH_ratio * abundances(indCH)
+      if (indCH3 >0) NCH3  = actual_av/AV_NH_ratio * abundances(indCH3)
+      if (indH2CO>0) NH2CO = actual_av/AV_NH_ratio * abundances(indH2CO)
+      if (indCO2 >0) NCO2  = actual_av/AV_NH_ratio * abundances(indCO2)
+      if (indN2O >0) NN2O  = actual_av/AV_NH_ratio * abundances(indN2O)
+      if (indCH4 >0) NCH4  = actual_av/AV_NH_ratio * abundances(indCH4)
+      if (indOH  >0) NOH   = actual_av/AV_NH_ratio * abundances(indOH)
+      if (indHCO >0) NHCO  = actual_av/AV_NH_ratio * abundances(indHCO)
+      if (indCN  >0) NCN   = actual_av/AV_NH_ratio * abundances(indCN)
+      if (indHCN >0) NHCN  = actual_av/AV_NH_ratio * abundances(indHCN)
+      if (indHNC >0) NHNC  = actual_av/AV_NH_ratio * abundances(indHNC)
+      if (indNH  >0) NNH   = actual_av/AV_NH_ratio * abundances(indNH)
+      if (indNH2 >0) NNH2  = actual_av/AV_NH_ratio * abundances(indNH2)
+      if (indNH3 >0) NNH3  = actual_av/AV_NH_ratio * abundances(indNH3)
 
       call integrate_chemical_scheme(delta_t=output_timestep, temp_abundances=abundances(1:nb_species), & ! Inputs
       i_tol=itol, a_tol=atol, i_task=itask, i_opt=iopt, m_f=mf, & ! Inputs
@@ -242,12 +260,24 @@ PROGRAM nmgc
 
       call write_current_rates(index=output_idx)
       call write_current_output(index=output_idx)
+      ! Overflow guard: the coagulation collision rate the Rung 1 top-bin policy
+      ! drops (and the total), recorded per output by write_current_dust. Must stay
+      ! ~0; a growing fraction means mass reached the top bins.
+      if (coagulation) call dust_coagulation_flux_diag(coag_dropped_flux, coag_total_flux)
       call write_current_dust(index=output_idx)
 
       first_step_done = .true.
     enddo
 
     call write_abundances('abundances.tmp')
+
+    ! Rung 4 solver characterization (4-IV cost + convergence effort; oracle vs production).
+    write(stdo,'(a)')    ' --- DLSODES solver statistics (Rung 4 characterization) ---'
+    write(stdo,'(a,i0)') '   method flag mf              = ', mf
+    write(stdo,'(a,i0)') '   steps        NST            = ', tot_nst
+    write(stdo,'(a,i0)') '   RHS evals    NFE            = ', tot_nfe
+    write(stdo,'(a,i0)') '   Jac/LU evals NJE            = ', tot_nje
+    write(stdo,'(a,i0)') '   solver restarts (istate/=2) = ', tot_fail
 
   elseif (do_outputs) then
     inquire(file='abundances.out', exist=isDefined)
@@ -320,8 +350,14 @@ PROGRAM nmgc
       call dlsodes(get_temporal_derivatives,nb_species,temp_abundances,t,t_stop_step,i_tol,RELATIVE_TOLERANCE,&
       satol,i_task,i_state,i_opt,rwork,lrw,iwork,liw,get_jacobian,m_f)
 
+      ! Accumulate DLSODES step statistics (reset by set_work_arrays each call, so read now).
+      tot_nst = tot_nst + int(iwork(11), 8)
+      tot_nfe = tot_nfe + int(iwork(12), 8)
+      tot_nje = tot_nje + int(iwork(13), 8)
+
       ! Whenever the solver fails converging, print the reason.
       if (i_state.ne.2) then
+        tot_fail = tot_fail + 1
         write(*,*) 'ISTATE = ', I_STATE
       endif
 

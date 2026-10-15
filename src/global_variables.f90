@@ -17,6 +17,13 @@ implicit none
 !Integer parameter to define number of grains to be used in simulation.
 ! integer, parameter     :: nb_grains=1
 integer                  :: nb_grains
+!> Hard cap on nb_grains. Grain/ice species-name indices are written with a
+!! 2-digit format (I2.2) into a character(2) buffer in input_output.f90 and
+!! gasgrain.f90; an index >= 100 overflows the field to '**', so bins 100+ collapse
+!! onto duplicate names ('GRAIN**') and coagulation products are silently routed to
+!! the wrong bin (mass non-conservation). Until the name builders AND parsers are
+!! widened to 3 digits (v2), init must refuse any grid with more than this many bins.
+integer, parameter       :: MAX_GRAINS_NAMEFMT = 99
 real(double_precision),allocatable, dimension(:):: grain_radii,grain_temp
 !> Dust size grid (stage 3). radius_grid is an alias kept for clarity in the
 !! dust code; grain_radii remains the canonical array the chemistry consumes.
@@ -35,6 +42,48 @@ character(len=80)        :: dust_ic = 'MRN'                 !< 'MRN' or 'tabulat
 !! non-negligible value at runtime means a_max is too low. Purely diagnostic in
 !! stage 3 (no dynamics yet).
 real(double_precision)   :: dust_mass_sink = 0.d0 !< [g per H] mass accumulated above m_N
+
+! --- Coagulation (Rung 1). All default OFF so the build stays bit-identical to
+!     nmgc-2.0 unless a run explicitly asks for it in parameters.in. ------------
+logical                  :: coagulation = .false.          !< master switch (parameters.in: coagulation)
+character(len=20)        :: coagulation_kernel = 'constant' !< 'constant' (Rung 1) | 'brownian' (Rung 1b)
+real(double_precision)   :: constant_kernel_k0 = 0.d0       !< [cm^3/s] constant kernel K0 for validation
+integer                  :: nb_chemistry_reactions = 0      !< reactions before coagulation is appended
+integer                  :: nb_coagulation_reactions = 0    !< appended coagulation pseudo-reactions (grain + ice transport)
+integer                  :: nb_coag_grain_reactions = 0     !< grain coagulation reactions (non-overflow unordered pairs)
+integer                  :: nb_ice_transport_reactions = 0  !< ice-transport reactions (ordered non-overflow pairs x ice bases)
+integer                  :: coag_n_ordered_nonoverflow = 0  !< number of ORDERED non-overflow pairs (i,j), i,j=1..N
+integer                  :: nb_ice_bases = 0                 !< number of base ice species transported by coagulation
+
+! Base-ice initial totals deferred from read_abundances: a user gives a single total
+! per ice species under the base name (e.g. "JCO = 1e-4"); dust_ice_place distributes
+! it across the per-bin species J01CO..J0NCO (area-weighted, or overridden).
+integer                  :: nb_ice_ic = 0
+character(len=11), allocatable, dimension(:) :: ice_ic_base_names !< base name, e.g. "CO"
+real(double_precision), allocatable, dimension(:) :: ice_ic_totals !< total abundance per H
+integer                  :: coag_overflow_pairs_skipped = 0 !< pairs whose product overflows m_N (Rung 1: skipped)
+integer, allocatable, dimension(:) :: coag_overflow_i, coag_overflow_j !< the skipped pairs, for the dropped-flux check
+real(double_precision)   :: coag_dropped_flux = 0.d0 !< runtime coagulation collision rate dropped by the top-bin policy
+real(double_precision)   :: coag_total_flux   = 0.d0 !< runtime total coagulation collision rate (all pairs)
+integer, parameter       :: COAGULATION_TYPE = 50           !< dedicated reaction type for coagulation pseudo-reactions
+integer, parameter       :: COAG_REACTION_ID_BASE = 900000  !< high base for coagulation REACTION_IDs (clear of chemistry file IDs)
+
+! --- Rung 5: dynamic surface-rate GTODN, analytic grain-abundance Jacobian map.
+!! Built once at init by build_gtodn_jacobian_map() when dynamic GTODN is active
+!! (coagulation on, or the NEMO_FORCE_DYNAMIC_GTODN override). These let get_jacobian
+!! add the d(rate)/dY(GRAIN_k) = nu*flux/Y_tot entries for the in-scope reaction
+!! classes, whose GRAIN_k dependence is in the rate coefficient only (GRAIN_k is not
+!! a compound, so the reactant differentiator never produces them). See
+!! docs/PhaseII_rung5_site_classification.md.
+integer, allocatable, dimension(:) :: grain_col_bin   !< dim(nb_species): bin k if the species is GRAIN_k^0 or GRAIN_k^-, else 0
+integer, allocatable, dimension(:) :: gtodn_jac_list  !< flat list of in-scope reaction indices (types 99, 14, 66, 67)
+integer                            :: gtodn_jac_n = 0  !< number of entries in gtodn_jac_list
+!> dim(nb_reactions): d(reaction_rates)/dY_tot(bin) for each in-scope reaction, recomputed
+!! analytically at its rate site every RHS evaluation (0 for out-of-scope or gated-off
+!! reactions). get_jacobian deposits dcoef * (bilinear part) into the grain columns, so all
+!! the state-dependent physics -- nu sign, the max(Y_tot,floor) floor, the photodesorption
+!! monolayer cap, and the H/H2 sticking(SUMLAY) term -- lives where SUMLAY/stick are in scope.
+real(double_precision), allocatable, dimension(:) :: gtodn_jac_dcoef
 integer                  :: stdo, ffli
 ! real(double_precision), dimension(1:):: grain_radii
 ! Theses 3 parameters are only intnb_line_table_fluxended to easy the transition when one want to add a reactant or a
@@ -222,11 +271,25 @@ real(double_precision), allocatable, dimension(:) :: ACC_RATES_PREFACTOR !< dim(
 real(double_precision), allocatable, dimension(:) :: TUNNELING_RATE_TYPE_1 !< dim(nb_species) Quantum tunneling diffusion rate [s-1] (Watson 1976) (dEB.BOLTZ) / (4.HBAR.nb_sites_per_grain)
 real(double_precision), allocatable, dimension(:) :: TUNNELING_RATE_TYPE_2 !< dim(nb_species) Quantum tunneling diffusion rate [s-1] (Hasegawa & Herbst 1992) VIBRATION_FREQUENCY / nb_sites_per_grain.EXP(-2.DIFFUSION_BARRIER_THICKNESS / HBAR.(2.AMU.SMA.BOLTZ.EB)^1/2)
 integer, allocatable, dimension(:) :: SPECIES_CHARGE !< dim(nb_species) !< electric charge [in e-] for each species, 0 if neutral, positive or negative if ions.
+!> Grain-charging Coulomb/image focusing switch (Draine & Sutin 1987). Default 0 keeps
+!! the purely geometric type-0 charging rates bit for bit. 1 multiplies each type-0 rate
+!! by the per-bin focusing factor (see set_constant_rates). This is a measurement switch
+!! for sec:charge; it changes no physics default.
+integer :: charging_focusing = 0
+!> Electron sticking coefficient, applied to the electron-attachment rate ONLY when
+!! charging_focusing = 1 (the current A value already corresponds to sticking 1). Default 1.0.
+real(double_precision) :: electron_sticking = 1.0d0
 
 ! Arrays about reactions
 character(len=11), allocatable, dimension(:,:) :: REACTION_COMPOUNDS_NAMES !< dim(MAX_COMPOUNDS,nb_reactions). Empty string means no species
 integer, allocatable, dimension(:,:) :: REACTION_COMPOUNDS_ID !< dim(MAX_COMPOUNDS, nb_reactions) for all reactions, 
 !! list for reactants (first 3) and products (last 5). "nb_species+1" means no species
+real(double_precision), allocatable, dimension(:,:) :: REACTION_PRODUCT_WEIGHTS !< dim(MAX_COMPOUNDS, nb_reactions).
+!! Per-product stoichiometric weight w_p applied to the GAIN deposit of each product slot p (compound slots
+!! MAX_REACTANTS+1..MAX_COMPOUNDS). Default 1.0 reproduces existing chemistry bit-identically. Coagulation and
+!! ice-transport pseudo-reactions store the Podolak/Brauer redistribution weights (epsilon, 1-epsilon) here.
+!! The rate coefficient carries only K_ij (and the diagonal 1/2); the weight carries M_ijk. Loss (reactant
+!! depletion) is NEVER weighted. Reactant slots (1..MAX_REACTANTS) are unused and stay 1.0.
 real(double_precision), allocatable, dimension(:) :: branching_ratio !< dim(nb_reactions) Branching ratio of each reaction
 real(double_precision), allocatable, dimension(:) :: RATE_A !< dim(nb_reactions) Coefficient used to compute the reaction rate. Formula (and unit) is different in function of the reaction type.
 real(double_precision), allocatable, dimension(:) :: RATE_B !< dim(nb_reactions) Coefficient used to compute the reaction rate. Formula (and unit) is different in function of the reaction type.
@@ -274,6 +337,15 @@ real(double_precision) :: sticking_coeff_neutral  !< sticking coefficient for ne
 real(double_precision) :: sticking_coeff_positive !< sticking coefficient for positive species on grain surface [no unit]
 real(double_precision) :: sticking_coeff_negative !< sticking coefficient for negative species on grain surface [no unit]
 real(double_precision) :: MINIMUM_INITIAL_ABUNDANCE !< minimum value of the abundance (relative to H) [number ratio]
+!> [grains/cm^3] absolute floor on the grain number density, the same for every bin.
+!! SEMANTIC (important): this floors the DIVISOR wherever a live grain abundance is read
+!! as a denominator (e.g. a per-grain surface quantity n_X/n_grain), NOT the grain state
+!! variable itself -- flooring the population would inject mass and break conservation.
+!! Stored as an absolute density; the code converts it to a per-H abundance (divide by
+!! n_H) at the point of use. Surfaced now for the interface; CONSUMED by Rung 3, wired
+!! into nothing yet. Default ~10 grains/AU^3 (1 AU^3 = 3.348e39 cm^3 => 2.99e-39/cm^3).
+real(double_precision) :: grain_abundance_floor = 2.99d-39
+
 real(double_precision) :: initial_gas_density !< [part/cm^3] initial gas density of the structure
 real(double_precision) :: initial_gas_temperature !< initial gas temperature [K], simulation parameter
 real(double_precision) :: INITIAL_VISUAL_EXTINCTION !< initial visual extinction [mag] 
@@ -324,7 +396,11 @@ integer, parameter :: MAX_NUMBER_REACTION_TYPE=100 !< Max number of various reac
 integer, dimension(0:MAX_NUMBER_REACTION_TYPE-1) :: type_id_start !< list of id start for each reaction type given their type number
 integer, dimension(0:MAX_NUMBER_REACTION_TYPE-1) :: type_id_stop !< list of id stop for each reaction type given their type number
 
-character(len=80) :: GRAIN_TEMPERATURE_TYPE = 'fixed' !< ('fixed', 'fixed_to_dust_size', 'gas') How the grain temperature is set.
+!> Derived-grid grain-temperature choice: 'size_scaled' -> Td(a) via td_of_a
+!! (reference_dust_temperature*(a/reference_grain_radius)^(-1/6)); 'gas' -> Tgrain=Tgas
+!! for every bin. IGNORED when dust_grid_source='tabulated' (Td is the table column).
+!! dust_grid_source is the single grid switch; this is its derived-grid sub-switch.
+character(len=80) :: DERIVED_TEMPERATURE = 'size_scaled'
 !! STAGE 3: this becomes the name of an explicit Td(a) prescription evaluated once on the size grid.
 
 
@@ -427,6 +503,15 @@ integer, allocatable, dimension(:) :: IA_SYM !< dim(nb_species+1) column pointer
 integer, allocatable, dimension(:) :: JA_SYM !< row indices of the symbolic pattern (CSC), ascending within each column
 integer :: NNZ_SYM = 0                        !< number of nonzeros in the symbolic pattern
 integer :: n_sparsity_checks_done = 0         !< how many startup subset-asserts have run
+! Declared non-reactant Jacobian dependencies (Rung 4). These are (row,col) couplings
+! that do NOT arise from a reaction's reactant/product list -- e.g. a surface rate that
+! reads the live monolayer divisor SUMLAY(k) depends on Y(GRAIN_k0)/Y(GRAIN_k-) although
+! GRAIN_k is not a reactant of that reaction. build_symbolic_sparsity merges these into
+! the pattern before the CSC is finalised. Duplicates are allowed (deduped downstream).
+! Kept general so Rung 5's reciprocal GTODN entries reuse the same facility.
+integer, allocatable, dimension(:) :: DECLARED_JAC_ROW !< rows of declared non-reactant Jacobian couplings
+integer, allocatable, dimension(:) :: DECLARED_JAC_COL !< cols (differentiation variable) of declared couplings
+integer :: NB_DECLARED_JAC_DEPS = 0          !< number of declared couplings currently registered
 
 ! Diffusion and 1D variables
 real(double_precision) :: X_IONISATION_RATE !< Ionisation rate due to X-rays [s-1]
@@ -473,9 +558,69 @@ real(double_precision) :: actual_gas_temp !< Gas temperature [K]
 real(double_precision), dimension(:), allocatable :: actual_dust_temp !< dim(nb_grains) Dust temperature [K]
 real(double_precision) :: actual_av !< Visual extinction [mag]
 real(double_precision) :: actual_gas_density !< Gas density [part/cm^3]
+!> TEST-FIXTURE INSTRUMENT (default .false., inert in production): when .true.,
+!! get_temporal_derivatives skips its set_dependant_rates recompute, holding the
+!! rate coefficients frozen while Y is perturbed. This is the only way to verify
+!! the RHS/Jacobian product-deposit WEIGHTS by finite difference (a weight of 1.0
+!! is inert, so byte-identity cannot exercise the weighting). Kept in-tree because
+!! every rung that touches the weight field -- coagulation now, GTODN Jacobian at
+!! Rung 5 -- must be able to re-run tests/jac_weight_check against it.
+logical :: freeze_dependent_rates = .false.
 
 
 contains 
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Single predicate gating live (dynamic) vs frozen surface-rate GTODN.
+!! Rung 5: every grain-abundance-dependent surface-rate site queries THIS
+!! function instead of testing `coagulation` inline, so the coag gating and the
+!! verification override live in one place (brief sec.2, sec.4.2). It lives in
+!! global_variables (not next to solver_method_flag in gasgrain) because the rate
+!! sites are in ode_solver, and gasgrain USEs ode_solver -- putting it in gasgrain
+!! would be a circular dependency. global_variables is USEd by every caller.
+!!
+!! Returns .true. when the instantaneous grain abundance must be read at the rate
+!! sites (and, later, the analytic grain-abundance Jacobian entries supplied):
+!!   - production: exactly when coagulation is on. coag off => Y(GRAIN_k) is
+!!     constant => dynamic == frozen, and mf=121 stays bit-identical to nmgc-2.0.
+!!   - verification: forced on regardless of `coagulation` by the
+!!     NEMO_FORCE_DYNAMIC_GTODN override, for the coag-off reduction test
+!!     (gate 5b), analogous to NEMO_ORACLE_MF for the solver method flag.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+logical function dynamic_gtodn_active()
+implicit none
+
+if (force_dynamic_gtodn_override()) then
+  dynamic_gtodn_active = .true.
+  return
+endif
+
+dynamic_gtodn_active = coagulation
+
+return
+end function dynamic_gtodn_active
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Read the NEMO_FORCE_DYNAMIC_GTODN environment variable
+!! (verification/test only). Returns .true. only when set to a non-zero integer,
+!! forcing dynamic GTODN on with coagulation off for the gate-5b coag-off
+!! reduction test. Returns .false. when unset/blank/zero/unparseable -- the
+!! production default -- so it can never perturb a production run. Mirrors
+!! oracle_mf_override in gasgrain.f90.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+logical function force_dynamic_gtodn_override()
+implicit none
+character(len=32) :: v
+integer :: ln, st, val
+
+force_dynamic_gtodn_override = .false.
+call get_environment_variable('NEMO_FORCE_DYNAMIC_GTODN', v, ln, st)
+if (st.ne.0 .or. ln.le.0) return
+read(v, *, iostat=st) val
+if (st.eq.0 .and. val.ne.0) force_dynamic_gtodn_override = .true.
+
+return
+end function force_dynamic_gtodn_override
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !> @author 
@@ -659,6 +804,21 @@ close(902)
 nb_species = nb_species_for_gas + nb_species_for_grain ! The total number of species, sum of species in gas and grain
 nb_reactions = nb_gas_phase_reactions + nb_surface_reactions ! The total number of reactions, sum of species in gas and grain
 
+! Coagulation reactions are appended as a contiguous terminal block. The grain part
+! (nb_coag_grain_reactions) and the ORDERED non-overflow pair count were computed in
+! dust_coagulation_count() before this routine. Ice transport adds, per ice base
+! species, one reaction per ordered non-overflow pair; the ice-base count is only
+! known now (t_nb_species_for_grain = number of base surface species, all J ice in
+! 2-phase v1). nb_coagulation_reactions is 0 when coagulation is off, keeping
+! nb_reactions -- and the whole build -- unchanged.
+if (coagulation) then
+  nb_ice_bases = t_nb_species_for_grain
+  nb_ice_transport_reactions = coag_n_ordered_nonoverflow * nb_ice_bases * 2  ! x2: partner charge {0,-}
+  nb_coagulation_reactions = nb_coag_grain_reactions + nb_ice_transport_reactions
+endif
+nb_chemistry_reactions = nb_reactions
+nb_reactions = nb_reactions + nb_coagulation_reactions
+
 ! write(*,*)"nb_species_for_gas",nb_species_for_gas,"nb_gas_phase_reactions",nb_gas_phase_reactions
 ! write(*,*)"nb_species_for_grain",nb_species_for_grain,"nb_surface_reactions",nb_surface_reactions
 ! write(*,*)"nb_species,nb_reactions",nb_species,nb_reactions
@@ -799,6 +959,9 @@ REACTION_ID(1:nb_reactions) = 0
 
 allocate(REACTION_COMPOUNDS_ID(MAX_COMPOUNDS,nb_reactions))
 REACTION_COMPOUNDS_ID(1:MAX_COMPOUNDS,1:nb_reactions) = 0
+
+allocate(REACTION_PRODUCT_WEIGHTS(MAX_COMPOUNDS,nb_reactions))
+REACTION_PRODUCT_WEIGHTS(1:MAX_COMPOUNDS,1:nb_reactions) = 1.d0
 
 allocate(REACTION_COMPOUNDS_NAMES(MAX_COMPOUNDS,nb_reactions))
 REACTION_COMPOUNDS_NAMES(1:MAX_COMPOUNDS,1:nb_reactions) = ''

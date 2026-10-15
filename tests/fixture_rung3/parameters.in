@@ -1,0 +1,124 @@
+!# ------------------------------------------------
+!# Parameter file for the 0D multi-grain gas-grain model.
+!# ------------------------------------------------
+!# Blank lines, or lines with only spaces, are skipped.
+!# Only non-commented lines with a '=' are read: identifier = value(s),
+!# each value separated by at least one space. The parameter part of a line
+!# must be <= 80 characters; comments after it can be longer.
+
+!*****************************
+!*   Switch 2/3 phase model  *
+!*****************************
+
+is_3_phase = 0 ! 0: 2 phase, 1: 3 phase.  v1 target is 2-phase; the 3-phase path is kept, not removed.
+
+!*****************************
+!*          Switches         *
+!*****************************
+
+preliminary_test = 0 ! Comprehensive tests before the simulation. Switch off when launching many simulations.
+is_grain_reactions = 1 ! Accretion, grain surface reactions
+is_h2_formation_rate = 1 ! h2 formation rates on surfaces from Bron et al. (2014)
+is_absorption_h2 = 1 ! H2 self-shielding from Lee & Herbst (1996) (1=activated)
+is_absorption_co = 2 ! CO self-shielding. (1: Lee & Herbst (1996),  2: Visser et al. (2009))
+is_absorption_n2 = 1 ! N2 self-shielding from Li et al. (2013) (1=activated)
+is_photodesorb = 1 ! Switch to turn on the photodesorption of ices (default yield is 1e-4)
+is_crid = 0 ! Switch to turn on the CRID (cosmic rays induced diffusion) mechanism
+is_er_cir = 0 ! Switch to turn on Eley-Rideal and Complex Induced Reaction mechanisms (default=0: desactivated)
+grain_tunneling_diffusion = 0 ! 0=thermal; For H,H2: 1=QM1; 2=QM2; 3=choose fastest
+modify_rate_flag = 0 ! 1=modify H; 2=modify H,H2, 3=modify all, -1=H+H only
+conservation_type = 0 ! 0=only e- conserved; 1=elem #1 conserved, 2=elem #1 & #2, etc
+
+!*****************************
+!* Number of active layers   *
+!*****************************
+
+nb_active_lay =  2.000E+00 ! Number of active layers
+
+!*****************************
+!*    Gas phase parameters   *
+!*****************************
+
+initial_gas_density =  2.212E+08 ! initial gas density [part/cm-3]
+initial_gas_temperature =  2.741E+01 ! initial gas temperature [K]
+initial_visual_extinction =  1.582E+01 ! initial visual extinction
+cr_ionisation_rate =  1.300E-17 ! cosmic ray ionisation rate [s-1] (standard=1.3e-17)
+x_ionisation_rate =  0.000E+00 ! Ionisation rate due to X-rays [s-1]
+uv_flux =  1.554E+03 ! Scale factor for the UV flux, in unit of the reference flux (1.=nominal)
+
+!*****************************
+!*   Dust grid               *
+!*****************************
+! Grid geometry (derived): a geometric-in-mass grid from a_min..a_max at mass_ratio.
+! Set dust_grid_source = tabulated to read dust_grid_table.in instead.
+dust_grid_source = derived ! derived | tabulated
+derived_temperature = size_scaled ! size_scaled | gas (derived grid only; tabulated grid takes Td from the table column)
+! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;
+! gas: Tgrain = Tgas.
+a_min =  5.000E-07
+a_max =  1.0001E-06
+mass_ratio =  2.000E+00
+
+!*****************************
+!*        Coagulation        *
+!*****************************
+! Grain coagulation via the Smoluchowski kernel, with ice riding the coagulating
+! grains (Rung 2). Default OFF: absent/0 reproduces nmgc-2.0 bit-identically.
+coagulation = 0 ! gates override: 0=reference, 1=slow/nominal
+coagulation_kernel = constant ! constant | brownian (default constant)
+constant_kernel_k0 =  1.000E-14 ! gates override for slow/nominal
+
+!*****************************
+!*   Dust initial condition  *
+!*****************************
+dust_ic = MRN ! MRN | tabulated
+dust_power_law_index = -3.500E+00 ! dn/da ~ a^index (-3.5 = MRN); normalised by initial_dtg_mass_ratio
+sparsity = numerical ! Rung 3 (4d): live divisor adds d(rate)/dY(GRAIN_k); symbolic is Rung 4
+sparsity_check_steps = 5 ! debug: assert numerical subset symbolic on first N steps (0 disables)
+
+!*****************************
+!*      Grain parameters     *
+!*****************************
+! The size grid, the initial dust distribution, and the Td(a)/T_CR,peak(a) maps
+! currently live in 0D_grain_sizes.in. At stage 3 the grid moves here (derived
+! from a_min, a_max, mass_ratio + grain_density), the distribution moves to its
+! own IC file, and the maps become named prescriptions.
+
+initial_dtg_mass_ratio =  2.000E+00
+sticking_coeff_neutral =  1.000E+00 ! sticking coeff for neutral species
+sticking_coeff_positive =  0.000E+00 ! sticking coeff for positive species
+sticking_coeff_negative =  0.000E+00 ! sticking coeff for negative species
+grain_density =  3.000E+00 ! mass density of grain material
+reference_grain_radius =  1.000E-05 ! reference grain radius [cm]: single effective grain for is_grain_reactions=0, and a_ref for Td(a)
+reference_dust_temperature =  1.000E+01 ! [K] Td at reference_grain_radius; T_ref for the size-scaled Td(a) prescription
+diffusion_barrier_thickness =  1.000E-08 ! Barrier thickness [cm]
+surface_site_density =  8.000E+14 ! site density on one grain [cm-2]
+diff_binding_ratio_surf =  4.000E-01 ! Ratio used to compute DIFFUSION_BARRIER from BINDING_ENERGY if not known (surface species)
+diff_binding_ratio_mant =  8.000E-01 ! Ratio used to compute DIFFUSION_BARRIER from BINDING_ENERGY if not known (mantle species)
+chemical_barrier_thickness =  1.000E-08 ! grain reaction activation energy barrier width [cm]
+cr_peak_grain_temp =  7.000E+01 ! peak grain temperature [K] (CR heating)
+cr_peak_duration =  1.000E-05 ! duration [s] of peak grain temperature
+Fe_ionisation_rate =  3.000E-14 ! (cosmic) Fe-ion--grain encounter [s-1 grain-1]
+!! (for 0.1 micron grain) For cosmic photo desorptions, only Fe-ions are efficient to heat grains.
+vib_to_dissip_freq_ratio =  1.000E-02 ! [no unit] ratio of the surface-molecule bond frequency to the frequency at
+!! which energy is lost to the grain surface. Used for the RRK desorption mechanism
+!! (see Garrod et al. 2007). Assumed to be 1% by default.
+ED_H2 =  2.300E+01 ! H2 binding energy over itself. Used for the desorption encounter mechanism [K].
+
+!*****************************
+!*  Integration and Outputs  *
+!*****************************
+
+start_time =  1.000E+00
+stop_time =  1.000E+05
+nb_outputs = 20
+output_type = log ! linear, log
+! linear: Output times are linearly spaced
+! log   : Outputs times are log-spaced
+relative_tolerance =  1.000E-04 ! Relative tolerance of the solver
+minimum_initial_abundance =  1.000E-40 ! default minimum initial fraction abundance
+! Floor on the grain number density used as a DENOMINATOR (a per-grain quantity
+! n_X/n_grain), NOT the grain state variable -- flooring the population would inject
+! mass and break conservation. Absolute [grains/cm^3], same for every bin; converted
+! to a per-H abundance in the code. ~10 grains/AU^3. Surfaced now; consumed by Rung 3.
+grain_abundance_floor =  2.990E-39 ! [grains/cm^3] divisor floor (~10 grains/AU^3)

@@ -161,6 +161,22 @@ integer, intent(in) :: index !<[in] The reference index of the current output
 integer :: k
 real(double_precision) :: n_k, dust_mass_per_h, grain_number_per_h
 real(double_precision), dimension(nb_grains) :: nk_all
+real(double_precision) :: dropped_frac
+real(double_precision), parameter :: COAG_DROPPED_WARN = 1.d-3 !< warn once the dropped fraction exceeds 0.1%
+
+! Fraction of the coagulation collision rate dropped by the Rung 1 top-bin policy.
+! Computed in the main loop (dust_coagulation_flux_diag) into module globals; ~0
+! while the top bins are unpopulated, which is the condition for the overflow skip
+! to be lossless and the analytic gate to hold.
+dropped_frac = 0.d0
+if (coagulation .and. coag_total_flux > 0.d0) dropped_frac = coag_dropped_flux / coag_total_flux
+if (coagulation .and. dropped_frac > COAG_DROPPED_WARN) then
+  write(Error_unit,'(a,es9.2e2,a,es10.3e2,a)') &
+    ' Warning (coagulation): dropped-flux fraction = ', dropped_frac, &
+    ' at t = ', current_time/YEAR, ' yr -- mass is reaching the top bins;'
+  write(Error_unit,'(a)') &
+    '   the top-bin overflow skip is no longer lossless and the analytic gate is invalid. Use a larger grid.'
+endif
 
 ! total grain number per bin = neutral + negative charge state (per H)
 dust_mass_per_h    = 0.d0
@@ -179,16 +195,16 @@ if (index == 1) then
   write(36,'(a)') '! n_k is the total grain number per bin (GRAIN0_k + GRAIN0_k-), per H.'
   write(36,'(a)') '! sigma(a) = m*dn/dlog a is a reduction (scripts/dust_distribution.py), not stored here.'
   write(36,'(a)') '! time[yr]  bin  radius[cm]  mass[g]  n_k[/H]  m_k*n_k[g/H]  &
-                  &dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]'
+                  &dust_mass[g/H]  grain_number[/H]  dust_mass_sink[g/H]  coag_dropped_flux_frac'
 else
   open(36, file='dust_distribution.out', status='old', position='append')
 end if
 
 do k=1,nb_grains
   write(36,'(es20.10e3,2x,i4,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,&
-            &es22.14e3,2x,es22.14e3,2x,es22.14e3)') &
+            &es22.14e3,2x,es22.14e3,2x,es22.14e3,2x,es22.14e3)') &
     current_time/YEAR, k, grain_radii(k), mass_grid(k), nk_all(k), mass_grid(k)*nk_all(k), &
-    dust_mass_per_h, grain_number_per_h, dust_mass_sink
+    dust_mass_per_h, grain_number_per_h, dust_mass_sink, dropped_frac
 enddo
 
 close(36)
@@ -324,6 +340,10 @@ end subroutine write_abundances
 !
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
 subroutine write_parameters()
+! Rewrites parameters.in in canonical form (the original is kept as parameters.in.bak).
+! ROUND-TRIP CONTRACT: every key accepted by read_parameters_in must be written here, and
+! reals are written with es24.16e3 (exact for double precision), so that re-running in the
+! same directory reproduces the configuration bit-for-bit. Enforced by tests/params_roundtrip.sh.
 use global_variables
 
   implicit none
@@ -358,9 +378,6 @@ use global_variables
   write(10,'(a)') ""
   write(10,'(a,i0,a)') 'preliminary_test = ', IS_TEST, ' ! Will or will not do comprehensive tests &
   &before the simulation. Switch it off when lauching thousands or simulations'
-  write(10,'(a,a,a)') 'grain_temperature_type = ', trim(GRAIN_TEMPERATURE_TYPE), ' ! fixed_to_dust_size, gas'
-  write(10,'(a)') '! fixed_to_dust_size: Td = Td(a), one temperature per size bin;'
-  write(10,'(a)') '! gas: Tgrain = Tgas ;'
   write(10,'(a,i0,a)') 'is_grain_reactions = ', IS_GRAIN_REACTIONS, ' ! Accretion, grain surface reactions'
   write(10,'(a,i0,a)') 'is_h2_formation_rate = ', is_h2_formation_rate, ' ! h2 formation rates on surfaces from Bron et al: (2014)'
   write(10,'(a,i0,a)') 'is_absorption_h2 = ', is_absorption_h2, ' ! H2 self-shielding from Lee & Herbst (1996) (1=activated)'
@@ -383,33 +400,40 @@ use global_variables
   write(10,'(a)') "!* Number of active layers   *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
-  write(10,'(a,es10.3e2,a)') 'nb_active_lay = ',nb_active_lay, ' ! Number of active layers'
+  write(10,'(a,es24.16e3,a)') 'nb_active_lay = ',nb_active_lay, ' ! Number of active layers'
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*    Gas phase parameters   *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
-  write(10,'(a,es10.3e2,a)') 'initial_gas_density = ', initial_gas_density, ' ! initial gas density [part/cm-3]'
-  write(10,'(a,es10.3e2,a)') 'initial_gas_temperature = ', initial_gas_temperature, ' ! initial gas temperature [K]'
-  write(10,'(a,es10.3e2,a)') 'initial_visual_extinction = ', INITIAL_VISUAL_EXTINCTION, ' ! initial visual extinction'
-  write(10,'(a,es10.3e2,a)') 'cr_ionisation_rate = ', CR_IONISATION_RATE, ' ! cosmic ray ionisation rate [s-1] (standard=1.3e-17)'
-  write(10,'(a,es10.3e2,a)') 'x_ionisation_rate = ', X_IONISATION_RATE, ' ! Ionisation rate due to X-rays [s-1]'
-  write(10,'(a,es10.3e2,a)') 'uv_flux = ', UV_FLUX, ' ! Scale factor for the UV flux, in unit of the reference flux (1.=nominal)'
+  write(10,'(a,es24.16e3,a)') 'initial_gas_density = ', initial_gas_density, ' ! initial gas density [part/cm-3]'
+  write(10,'(a,es24.16e3,a)') 'initial_gas_temperature = ', initial_gas_temperature, ' ! initial gas temperature [K]'
+  write(10,'(a,es24.16e3,a)') 'initial_visual_extinction = ', INITIAL_VISUAL_EXTINCTION, ' ! initial visual extinction'
+  write(10,'(a,es24.16e3,a)') 'cr_ionisation_rate = ', CR_IONISATION_RATE, ' ! cosmic ray ionisation rate [s-1] (standard=1.3e-17)'
+  write(10,'(a,es24.16e3,a)') 'x_ionisation_rate = ', X_IONISATION_RATE, ' ! Ionisation rate due to X-rays [s-1]'
+  write(10,'(a,es24.16e3,a)') 'uv_flux = ', UV_FLUX, ' ! Scale factor for the UV flux, in unit of the reference flux (1.=nominal)'
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*   Dust grid (derived)     *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "! Grid geometry: mass grid, geometric in mass, from a_min..a_max at mass_ratio."
   write(10,'(a,a,a)') 'dust_grid_source = ', trim(dust_grid_source), ' ! derived or tabulated (dust_grid_table.in)'
-  write(10,'(a,es10.3e2,a)') 'a_min = ', a_min, ' ! [cm] smallest representative grain radius'
-  write(10,'(a,es10.3e2,a)') 'a_max = ', a_max, ' ! [cm] largest representative grain radius'
-  write(10,'(a,es10.3e2,a)') 'mass_ratio = ', mass_ratio, ' ! per-bin mass ratio (<= 2; nb_bins derived from it)'
+  write(10,'(a,a,a)') 'derived_temperature = ', trim(DERIVED_TEMPERATURE), ' ! size_scaled | gas (derived grid only)'
+  write(10,'(a)') '! size_scaled: Td = Td(a) ~ a^(-1/6), one temperature per size bin;'
+  write(10,'(a)') '! gas: Tgrain = Tgas ; ignored when dust_grid_source = tabulated (Td from table column)'
+  write(10,'(a,es24.16e3,a)') 'a_min = ', a_min, ' ! [cm] smallest representative grain radius'
+  write(10,'(a,es24.16e3,a)') 'a_max = ', a_max, ' ! [cm] largest representative grain radius'
+  write(10,'(a,es24.16e3,a)') 'mass_ratio = ', mass_ratio, ' ! per-bin mass ratio (<= 2; nb_bins derived from it)'
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*   Dust IC (populates grid)*"
   write(10,'(a)') "!*****************************"
-  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN or tabulated'
-  write(10,'(a,es10.3e2,a)') 'dust_power_law_index = ', dust_power_law_index, &
+  write(10,'(a,a,a)') 'dust_ic = ', trim(dust_ic), ' ! MRN, monodisperse or tabulated'
+  write(10,'(a)') "! Coagulation (Rung 1): grain coagulation via the Smoluchowski kernel."
+  write(10,'(a,i0,a)') 'coagulation = ', merge(1,0,coagulation), ' ! 0/1 master switch'
+  write(10,'(a,a,a)') 'coagulation_kernel = ', trim(coagulation_kernel), ' ! constant (Rung 1) or brownian'
+  write(10,'(a,es24.16e3,a)') 'constant_kernel_k0 = ', constant_kernel_k0, ' ! [cm^3/s] constant kernel for the analytic gate'
+  write(10,'(a,es24.16e3,a)') 'dust_power_law_index = ', dust_power_law_index, &
     ' ! MRN exponent dn/da ~ a^index (-3.5 = MRN), normalised by initial_dtg_mass_ratio'
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
@@ -423,47 +447,53 @@ use global_variables
   write(10,'(a)') "!*      Grain parameters     *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
-  write(10,'(a,es10.3e2,a)') 'initial_dtg_mass_ratio = ', initial_dtg_mass_ratio, ' ! dust-to-gas ratio by mass'
-  write(10,'(a,es10.3e2,a)') 'sticking_coeff_neutral = ', sticking_coeff_neutral, ' ! sticking coeff for neutral species'
-  write(10,'(a,es10.3e2,a)') 'sticking_coeff_positive = ', sticking_coeff_positive, ' ! sticking coeff for positive species'
-  write(10,'(a,es10.3e2,a)') 'sticking_coeff_negative = ', sticking_coeff_negative, ' ! sticking coeff for negative species'
-  write(10,'(a,es10.3e2,a)') 'grain_density = ', GRAIN_DENSITY, ' ! mass density of grain material'
-  write(10,'(a,es10.3e2,a)') 'reference_grain_radius = ', reference_grain_radius, ' ! reference grain radius [cm] &
+  write(10,'(a,es24.16e3,a)') 'initial_dtg_mass_ratio = ', initial_dtg_mass_ratio, ' ! dust-to-gas ratio by mass'
+  write(10,'(a,es24.16e3,a)') 'sticking_coeff_neutral = ', sticking_coeff_neutral, ' ! sticking coeff for neutral species'
+  write(10,'(a,es24.16e3,a)') 'sticking_coeff_positive = ', sticking_coeff_positive, ' ! sticking coeff for positive species'
+  write(10,'(a,es24.16e3,a)') 'sticking_coeff_negative = ', sticking_coeff_negative, ' ! sticking coeff for negative species'
+  write(10,'(a,es24.16e3,a)') 'grain_density = ', GRAIN_DENSITY, ' ! mass density of grain material'
+  write(10,'(a,es24.16e3,a)') 'reference_grain_radius = ', reference_grain_radius, ' ! reference grain radius [cm] &
   &(single effective grain for is_grain_reactions=0; a_ref for Td(a))'
-  write(10,'(a,es10.3e2,a)') 'reference_dust_temperature = ', reference_dust_temperature, &
+  write(10,'(a,es24.16e3,a)') 'reference_dust_temperature = ', reference_dust_temperature, &
     ' ! [K] Td at reference_grain_radius, T_ref for the size-scaled Td(a) prescription'
-  write(10,'(a,es10.3e2,a)') 'diffusion_barrier_thickness = ', DIFFUSION_BARRIER_THICKNESS, ' ! Barrier thickness [cm]'
-  write(10,'(a,es10.3e2,a)') 'surface_site_density = ', SURFACE_SITE_DENSITY, ' ! site density on one grain [cm-2]'
-  write(10,'(a,es10.3e2,a)') 'diff_binding_ratio_surf = ', DIFF_BINDING_RATIO_SURF, &
+  write(10,'(a,es24.16e3,a)') 'diffusion_barrier_thickness = ', DIFFUSION_BARRIER_THICKNESS, ' ! Barrier thickness [cm]'
+  write(10,'(a,es24.16e3,a)') 'surface_site_density = ', SURFACE_SITE_DENSITY, ' ! site density on one grain [cm-2]'
+  write(10,'(a,es24.16e3,a)') 'diff_binding_ratio_surf = ', DIFF_BINDING_RATIO_SURF, &
                              ' ! Ratio used to compute the DIFFUSION_BARRIER from the BINDING_ENERGY if not known (surface species)'
-  write(10,'(a,es10.3e2,a)') 'diff_binding_ratio_mant = ', DIFF_BINDING_RATIO_MANT, &
+  write(10,'(a,es24.16e3,a)') 'diff_binding_ratio_mant = ', DIFF_BINDING_RATIO_MANT, &
                              ' ! Ratio used to compute the DIFFUSION_BARRIER from the BINDING_ENERGY if not known  (mantle species)'
-  write(10,'(a,es10.3e2,a)') 'chemical_barrier_thickness = ', CHEMICAL_BARRIER_THICKNESS, &
+  write(10,'(a,es24.16e3,a)') 'chemical_barrier_thickness = ', CHEMICAL_BARRIER_THICKNESS, &
                              ' ! grain reaction activation energy barrier width. [cm]'
-  write(10,'(a,es10.3e2,a)') 'cr_peak_grain_temp = ', CR_PEAK_GRAIN_TEMP, ' ! peak grain temperature [K] (CR heating)'
-  write(10,'(a,es10.3e2,a)') 'cr_peak_duration = ', CR_PEAK_DURATION, ' ! duration [s] of peak grain temperature'
-  write(10,'(a,es10.3e2,a)') 'Fe_ionisation_rate = ', FE_IONISATION_RATE, ' ! (cosmic) Fe-ion--grain encounter [s-1 grain-1] '
-  write(10,'(a,es10.3e2,a)') '!! (for 0.1 micron grain) For cosmic photo desorptions, only Fe-ions are efficient to heat grains. '
-  write(10,'(a,es10.3e2,a)') 'vib_to_dissip_freq_ratio = ', VIB_TO_DISSIP_FREQ_RATIO, &
+  write(10,'(a,es24.16e3,a)') 'cr_peak_grain_temp = ', CR_PEAK_GRAIN_TEMP, ' ! peak grain temperature [K] (CR heating)'
+  write(10,'(a,es24.16e3,a)') 'cr_peak_duration = ', CR_PEAK_DURATION, ' ! duration [s] of peak grain temperature'
+  write(10,'(a,es24.16e3,a)') 'Fe_ionisation_rate = ', FE_IONISATION_RATE, ' ! (cosmic) Fe-ion--grain encounter [s-1 grain-1] '
+  write(10,'(a,es24.16e3,a)') '!! (for 0.1 micron grain) For cosmic photo desorptions, only Fe-ions are efficient to heat grains. '
+  write(10,'(a,es24.16e3,a)') 'vib_to_dissip_freq_ratio = ', VIB_TO_DISSIP_FREQ_RATIO, &
                              ' ! [no unit] The ratio of the surface-molecule bond frequency to the frequency at'
   write(10,'(a)') '!! which energy is lost to the grain surface. Used for the RRK (Rice Ramsperger-Kessel) desorption mechanism'
   write(10,'(a)') '!! (see Garrod el al. 2007 for more). Assumed to be 1% by default.'
-  write(10,'(a,es10.3e2,a)') 'ED_H2 = ', ED_H2, &
+  write(10,'(a,es24.16e3,a)') 'ED_H2 = ', ED_H2, &
                             ' ! H2 binding energy over itself. Used for the desorption encounter mechanism. in K. '
   write(10,'(a)') ""
   write(10,'(a)') "!*****************************"
   write(10,'(a)') "!*  Integration and Outputs  *"
   write(10,'(a)') "!*****************************"
   write(10,'(a)') ""
-  write(10,'(a,es10.3e2,a)') 'start_time = ', START_TIME/YEAR, ' ! [yrs] first output time'
-  write(10,'(a,es10.3e2,a)') 'stop_time = ', STOP_TIME/YEAR, ' ! [yrs] last output time'
+  write(10,'(a,es24.16e3,a)') 'start_time = ', START_TIME/YEAR, ' ! [yrs] first output time'
+  write(10,'(a,es24.16e3,a)') 'stop_time = ', STOP_TIME/YEAR, ' ! [yrs] last output time'
   write(10,'(a,i0,a)') 'nb_outputs = ', NB_OUTPUTS, ' ! Total number of outputs (used for linear or log spaced outputs)'
   write(10,'(a,a,a)') 'output_type = ', trim(OUTPUT_TYPE), ' ! linear, log'
   write(10, '(a)') '! linear: Output times are linearly spaced'
   write(10, '(a)') '! log   : Outputs times are log-spaced'
-  write(10,'(a,es10.3e2, a)') 'relative_tolerance = ',RELATIVE_TOLERANCE, ' ! Relative tolerance of the solver'
-  write(10,'(a,es10.3e2,a)') 'minimum_initial_abundance = ', MINIMUM_INITIAL_ABUNDANCE, ' ! default minimum initial &
+  write(10,'(a,es24.16e3, a)') 'relative_tolerance = ',RELATIVE_TOLERANCE, ' ! Relative tolerance of the solver'
+  write(10,'(a,i0,a)') 'charging_focusing = ', charging_focusing, &
+    ' ! 0: geometric type-0 charging rates (default, bit-identical); 1: Draine-Sutin Coulomb/image focusing'
+  write(10,'(a,es24.16e3,a)') 'electron_sticking = ', electron_sticking, &
+    ' ! electron sticking coefficient, applied to e- attachment only when charging_focusing = 1'
+  write(10,'(a,es24.16e3,a)') 'minimum_initial_abundance = ', MINIMUM_INITIAL_ABUNDANCE, ' ! default minimum initial &
                              &fraction abundance'
+  write(10,'(a,es24.16e3,a)') 'grain_abundance_floor = ', grain_abundance_floor, ' ! [grains/cm^3] floor on the grain &
+                             &number density used as a DENOMINATOR (not the state variable); ~10 grains/AU^3. Consumed by Rung 3.'
   close(10)
   
 end subroutine write_parameters
@@ -526,6 +556,15 @@ else if (dust_grid_source.eq.'tabulated') then
   endif
   call get_linenumber(filename, nb_lines)
   nb_grains = nb_lines
+  if (nb_grains.gt.MAX_GRAINS_NAMEFMT) then
+    write(Error_unit,*) 'Error (dust_grid, tabulated): ', trim(filename), ' has ', &
+      nb_grains, ' rows, exceeding the hard limit of ', MAX_GRAINS_NAMEFMT, '.'
+    write(Error_unit,*) 'Species-name indices use a 2-digit format (I2.2); bins >= 100', &
+      ' overflow to GRAIN** and silently corrupt the grid (mass non-conservation).'
+    write(Error_unit,*) 'Provide at most ', MAX_GRAINS_NAMEFMT, ' rows.', &
+      ' (3-digit names are a v2 task.)'
+    call exit(22)
+  endif
 else
   write(Error_unit,*) 'Error: dust_grid_source = "', trim(dust_grid_source), &
                       '" unknown. Use derived or tabulated.'
@@ -581,6 +620,8 @@ endif
 ! --- Initial distribution (populates the grid, does not define it) -------
 if (dust_ic.eq.'MRN') then
   call dust_ic_mrn()                   ! fills GTODN_0D_temp = 1/n_k
+else if (dust_ic.eq.'monodisperse') then
+  call dust_ic_monodisperse()          ! all grains in bin 1 (analytic coagulation gate)
 else if (dust_ic.eq.'tabulated') then
   if (dust_grid_source.ne.'tabulated') then
     write(Error_unit,*) 'Error: dust_ic = tabulated currently requires &
@@ -589,7 +630,7 @@ else if (dust_ic.eq.'tabulated') then
   endif
   ! GTODN_0D_temp already holds the tabulated 1/abundance column.
 else
-  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN or tabulated.'
+  write(Error_unit,*) 'Error: dust_ic = "', trim(dust_ic), '" unknown. Use MRN, monodisperse or tabulated.'
   call exit(31)
 endif
 
@@ -680,7 +721,11 @@ endif
 
 nb_columns_grain = get_nb_columns(filename_grain)
 
-if ((nb_columns_grain - 2).ne.NB_PRIME_ELEMENTS) then
+! An ice-free / dust-only network (e.g. the Rung 1 coagulation fixture) has no
+! surface species at all, so grain_species.in is legitimately empty and carries
+! no column count. Only cross-check the prime-element width when it has content;
+! this leaves every non-empty (stock) network byte-identical.
+if ((nb_species_for_grain > 0) .and. ((nb_columns_grain - 2).ne.NB_PRIME_ELEMENTS)) then
   write (Error_unit,'(a,i0,a,a,a,i0,a)') 'The number of prime elements is different in "element.in" (', NB_PRIME_ELEMENTS, &
   ') and "', trim(filename_grain), '" (', nb_columns_grain-2, ') .'
   call exit(6)
@@ -733,6 +778,9 @@ end subroutine read_element_in
 !
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
 subroutine read_parameters_in()
+! Numeric values are read list-directed: a fixed-width edit such as (e12.6) truncates the
+! full-precision values written by write_parameters, and an Ew.d edit scales a value typed
+! without a decimal point (e.g. '1000' -> 1e-3). See write_parameters for the contract.
 use global_variables
 
 implicit none
@@ -742,6 +790,7 @@ character(len=80) :: line
 character(len=1), parameter :: comment_character = '!' !< character that will indicate that the rest of the line is a comment
 integer :: comment_position !< the index of the comment character on the line. if zero, there is none on the current string
 integer :: error !< to store the state of a read instruction
+integer :: coag_flag_tmp !< 0/1 switch buffer for the coagulation flag
 
 logical :: isParameter, isDefined
 character(len=80) :: identificator, value
@@ -770,167 +819,183 @@ if (isDefined) then
       select case(identificator)
       ! Solver
       case('relative_tolerance', 'RTOL') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') RELATIVE_TOLERANCE
-      
-      !Switches      
+        read(value, *) RELATIVE_TOLERANCE
+
+      ! Grain-charging Coulomb/image focusing (Draine & Sutin 1987); default off = bit-identical.
+      case('charging_focusing')
+        read(value, *) charging_focusing
+      case('electron_sticking')
+        read(value, *) electron_sticking
+
+      !Switches
       case('is_3_phase')
-        read(value, '(i2)') is_3_phase
+        read(value, *) is_3_phase
 
 
       !case('nb_grains')
-      !  read(value, '(i4)') nb_grains
+      !  read(value, *) nb_grains
 
 
       case('is_grain_reactions', 'IDUST') ! The old name is kept for compatibility reasons
-        read(value, '(i2)') IS_GRAIN_REACTIONS
+        read(value, *) IS_GRAIN_REACTIONS
 
       case('is_h2_formation_rate')
-        read(value, '(i2)') is_h2_formation_rate
+        read(value, *) is_h2_formation_rate
       
       case('preliminary_test')
-        read(value, '(i2)') IS_TEST
+        read(value, *) IS_TEST
       
       case('is_absorption_h2')
-        read(value, '(i2)') is_absorption_h2
+        read(value, *) is_absorption_h2
 
       case('is_absorption_co')
-        read(value, '(i2)') is_absorption_co
+        read(value, *) is_absorption_co
 
       case('is_absorption_n2')
-        read(value, '(i2)') is_absorption_n2
+        read(value, *) is_absorption_n2
 
       case('is_photodesorb')
-      read(value, '(i2)') is_photodesorb
+      read(value, *) is_photodesorb
 
       case('is_crid')
-      read(value, '(i2)') is_crid
+      read(value, *) is_crid
 
       case('is_er_cir')
-      read(value, '(i2)') is_er_cir
+      read(value, *) is_er_cir
 
       case('grain_tunneling_diffusion', 'IGRQM') ! The old name is kept for compatibility reasons
-        read(value, '(i2)') GRAIN_TUNNELING_DIFFUSION
+        read(value, *) GRAIN_TUNNELING_DIFFUSION
       
       case('modify_rate_flag', 'IMODH') ! The old name is kept for compatibility reasons
-        read(value, '(i2)') MODIFY_RATE_FLAG
+        read(value, *) MODIFY_RATE_FLAG
       
       case('conservation_type', 'ICONS') ! The old name is kept for compatibility reasons
-        read(value, '(i2)') CONSERVATION_TYPE
+        read(value, *) CONSERVATION_TYPE
       
       ! 1D definitions
               
       ! Gas phase
       case('initial_gas_density', 'XNT0') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') initial_gas_density
+        read(value, *) initial_gas_density
       
       case('initial_gas_temperature', 'TEMP0') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') initial_gas_temperature
+        read(value, *) initial_gas_temperature
       
       case('initial_visual_extinction', 'TAU0') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') INITIAL_VISUAL_EXTINCTION
+        read(value, *) INITIAL_VISUAL_EXTINCTION
       
       case('cr_ionisation_rate', 'ZETA0') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') CR_IONISATION_RATE
+        read(value, *) CR_IONISATION_RATE
       
       case('x_ionisation_rate', 'ZETAX') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') X_IONISATION_RATE
+        read(value, *) X_IONISATION_RATE
       
       case('uv_flux', 'UVGAS') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') UV_FLUX
+        read(value, *) UV_FLUX
       
       ! Grain
       
       case('initial_dtg_mass_ratio', 'DTOGM') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') initial_dtg_mass_ratio
+        read(value, *) initial_dtg_mass_ratio
       
       case('sticking_coeff_neutral', 'STICK0') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') sticking_coeff_neutral
+        read(value, *) sticking_coeff_neutral
       
       case('sticking_coeff_positive', 'STICKP') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') sticking_coeff_positive
+        read(value, *) sticking_coeff_positive
       
       case('sticking_coeff_negative', 'STICKN') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') sticking_coeff_negative
+        read(value, *) sticking_coeff_negative
       
       case('grain_density', 'RHOD') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') GRAIN_DENSITY
+        read(value, *) GRAIN_DENSITY
       
       case('reference_grain_radius', 'grain_radius', 'RD') ! legacy names kept for compatibility
-        read(value, '(e12.6)') reference_grain_radius
+        read(value, *) reference_grain_radius
       case('reference_dust_temperature')
-        read(value, '(e12.6)') reference_dust_temperature
+        read(value, *) reference_dust_temperature
       case('a_min')
-        read(value, '(e12.6)') a_min
+        read(value, *) a_min
       case('a_max')
-        read(value, '(e12.6)') a_max
+        read(value, *) a_max
       case('mass_ratio')
-        read(value, '(e12.6)') mass_ratio
+        read(value, *) mass_ratio
       case('dust_power_law_index')
-        read(value, '(e12.6)') dust_power_law_index
+        read(value, *) dust_power_law_index
       case('dust_grid_source')
         read(value, *) dust_grid_source
+      case('coagulation')                         ! Rung 1 master switch (0/1, like the other switches)
+        read(value, *) coag_flag_tmp
+        coagulation = (coag_flag_tmp /= 0)
+      case('coagulation_kernel')                  ! 'constant' (Rung 1) | 'brownian' (Rung 1b)
+        read(value, *) coagulation_kernel
+      case('constant_kernel_k0')                  ! [cm^3/s] constant kernel for the analytic gate
+        read(value, *) constant_kernel_k0
       case('dust_ic')
         read(value, *) dust_ic
       case('sparsity')
         read(value, *) sparsity
       case('sparsity_check_steps')
-        read(value, '(i8)') sparsity_check_steps
+        read(value, *) sparsity_check_steps
         
       case('diffusion_barrier_thickness', 'ACM') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') DIFFUSION_BARRIER_THICKNESS
+        read(value, *) DIFFUSION_BARRIER_THICKNESS
       
       case('surface_site_density', 'SNS') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') SURFACE_SITE_DENSITY
+        read(value, *) SURFACE_SITE_DENSITY
         
       case('diff_binding_ratio_surf')
-        read(value, '(e12.6)') DIFF_BINDING_RATIO_SURF
+        read(value, *) DIFF_BINDING_RATIO_SURF
       
       case('diff_binding_ratio_mant')
-        read(value, '(e12.6)') DIFF_BINDING_RATIO_MANT
+        read(value, *) DIFF_BINDING_RATIO_MANT
       
       case('chemical_barrier_thickness', 'ACT') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') CHEMICAL_BARRIER_THICKNESS
+        read(value, *) CHEMICAL_BARRIER_THICKNESS
       
       case('cr_peak_grain_temp', 'TSMAX') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') CR_PEAK_GRAIN_TEMP
+        read(value, *) CR_PEAK_GRAIN_TEMP
       
       case('cr_peak_duration', 'CRT') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') CR_PEAK_DURATION
+        read(value, *) CR_PEAK_DURATION
       
       case('Fe_ionisation_rate', 'CRFE') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') FE_IONISATION_RATE
+        read(value, *) FE_IONISATION_RATE
       
       case('vib_to_dissip_freq_ratio', 'ARRK') ! The old name is kept for compatibility reasons
-        read(value, '(e12.6)') VIB_TO_DISSIP_FREQ_RATIO
+        read(value, *) VIB_TO_DISSIP_FREQ_RATIO
 
       case('ED_H2')
-      read(value, '(e12.6)') ED_H2
+      read(value, *) ED_H2
     
       !case('is_dust_MRN')
       !ead(value, '(i2)') is_dust_MRN
      
       case('nb_active_lay')
-      read(value, '(e12.6)') nb_active_lay
+      read(value, *) nb_active_lay
       
       ! Outputs
       case('nb_outputs')
-        read(value, '(i4)') NB_OUTPUTS
+        read(value, *) NB_OUTPUTS
       
       case('start_time')
-        read(value, '(e12.6)') START_TIME
+        read(value, *) START_TIME
       
       case('stop_time')
-        read(value, '(e12.6)') STOP_TIME
+        read(value, *) STOP_TIME
       
       case('output_type')
         read(value, *) OUTPUT_TYPE
       
       ! Initial abundances
       case('minimum_initial_abundance')
-        read(value, '(e12.6)') MINIMUM_INITIAL_ABUNDANCE
+        read(value, *) MINIMUM_INITIAL_ABUNDANCE
+
+      case('grain_abundance_floor')                 ! [grains/cm^3] divisor floor; consumed by Rung 3
+        read(value, *) grain_abundance_floor
       
-      case('grain_temperature_type')
-        read(value, *) GRAIN_TEMPERATURE_TYPE
+      case('derived_temperature')
+        read(value, *) DERIVED_TEMPERATURE
          
       case default
         write(*,*) 'Warning: An unknown parameter has been found'
@@ -1435,10 +1500,13 @@ enddo
 !  write(*,*)"--------------------------------------------------------------------------------------"
 !    pause
 
-! Reorder reaction file entries with ITYPE
+! Reorder reaction file entries with ITYPE. Only the chemistry reactions live in
+! the unordered (UO) arrays; the coagulation block is appended pre-sorted after
+! read_reactions, so bound this to nb_chemistry_reactions (== nb_reactions when
+! coagulation is off, leaving the stock reorder byte-identical).
 jk=1
 do i=0,MAX_NUMBER_REACTION_TYPE
-  do j=1,nb_reactions
+  do j=1,nb_chemistry_reactions
     if (itypeuo(j).eq.i) then
       REACTION_COMPOUNDS_NAMES(:,jk)=SYMBOLUO(:,j)     
       RATE_A(jk)=AUO(j)
@@ -1483,9 +1551,9 @@ do i=1,nb_reactions
 !  endif
 enddo  
 !  pause
-if (jk.ne.nb_reactions+1) then
+if (jk.ne.nb_chemistry_reactions+1) then
   write(Error_unit,*) 'Some reaction was not found by the reorder process'
-  write(Error_unit,*) jk,'=/',nb_reactions+1 
+  write(Error_unit,*) jk,'=/',nb_chemistry_reactions+1 
   call exit(4)
 endif
 
@@ -1705,7 +1773,15 @@ if (isDefined) then
   close(10)
 endif
 
-! We check if all species in abundances.in exists in the simulation
+! We check if all species in abundances.in exists in the simulation. A base-ice
+! total (e.g. "JCO" giving the TOTAL surface CO) is not itself a per-bin species;
+! when coagulation is on and its per-bin form J01<base> exists, it is DEFERRED to
+! dust_ice_place, which distributes it across J01<base>..J0N<base>.
+if (allocated(ice_ic_base_names)) deallocate(ice_ic_base_names)
+if (allocated(ice_ic_totals))    deallocate(ice_ic_totals)
+allocate(ice_ic_base_names(max(nb_lines,1)), ice_ic_totals(max(nb_lines,1)))
+ice_ic_base_names = ''; ice_ic_totals = 0.d0
+nb_ice_ic = 0
 do j=1,nb_lines
   error = 1
   do i=1,nb_species
@@ -1713,7 +1789,21 @@ do j=1,nb_lines
       error = 0 ! The species exist
     endif
   enddo
-  
+
+  if (error.eq.1) then
+    ! deferred base-ice total?  name is "J<base>" (or K) and "J01<base>" is a species
+    if (coagulation .and. (temp_names(j)(1:1).eq.'J' .or. temp_names(j)(1:1).eq.'K')) then
+      do i=1,nb_species
+        if (species_name(i) .eq. (temp_names(j)(1:1)//'01'//trim(temp_names(j)(2:)))) error = 0
+      enddo
+      if (error.eq.0) then
+        nb_ice_ic = nb_ice_ic + 1
+        ice_ic_base_names(nb_ice_ic) = temp_names(j)(2:)          ! base (strip J/K prefix)
+        ice_ic_totals(nb_ice_ic)     = temp_abundances(j)
+      endif
+    endif
+  endif
+
   if (error.eq.1) then
     write(*,*) j
     write(*,*) temp_names

@@ -1,0 +1,347 @@
+From cf4ec7e3181698e54b2d741c990e78be986d3ca4 Mon Sep 17 00:00:00 2001
+From: NEMO Phase II executor <executor@nemo.local>
+Date: Sun, 16 Aug 2026 00:11:03 +0000
+Subject: [PATCH] Phase II: Rung 1b -- free-molecular Brownian coagulation
+ kernel
+
+Adds the Brownian kernel branch to coag_kernel(i,j), the single kernel function
+the rate setter and the dropped-flux guard already share, so the reactions and the
+overflow guard pick it up together with no other plumbing change:
+
+  K_ij = (a_i+a_j)^2 * sqrt( 8 pi k_B T / mu_ij )     [free molecular, cm^3/s]
+
+with mu_ij = m_i m_j/(m_i+m_j). Design-locked choices: MEAN relative thermal speed
+sqrt(8 k_B T/pi mu) (not RMS); GAS temperature (the momentum bath -- grain surface
+temperature is a different quantity and does not enter); p_stick = 1; full per-bin
+mu_ij mass dependence (the single gas T only makes the temperature factor common,
+NOT the kernel uniform). Fuchs/continuum deferred behind the same interface.
+
+Because the kernel now needs T, dust_coagulation_set_rates is moved to just after
+get_structure_properties sets gas_temperature (nothing between uses coag rate
+VALUES -- sparsity comes from the resolved compound IDs). 0D isothermal => setting
+once at init is exact; the per-macro-step recompute for varying T (1D) reuses this
+same function and is deferred.
+
+Validation (design-approved trio):
+  * tests/coag_kernel_check.{f90,sh}: ABSOLUTE check of coag_kernel(1,1) and
+    coag_kernel(1,2) against hand-computed values for the fixture grid/T, pinning
+    the prefactor -- matches to ~1e-11 (the RMS-speed form would be 8.5% off).
+  * tests/coag_brownian_gate.sh: mass Sum m_k n_k conserved to 3.5e-15, and the
+    monodisperse early-slope dN/dt|_0 = -1/2 K11_phys nH N0^2 reproduced to 4.7e-5,
+    confirming the kernel is correctly wired into the RHS (magnitude + 1/2 self-pair
+    + nH factor). Self-similar late-time comparison intentionally skipped.
+
+Regression: constant-kernel gate unchanged (5.4e-15 / 2.2e-5); coagulation-OFF
+still byte-identical (jac_weight_check 13450 entries, worst reldiff 1.8006e-3, 0
+weight bugs). The overflow guard now tracks the Brownian kernel automatically (it
+evaluates coag_kernel on the skipped pairs); the Brownian gate run raised no
+dropped-flux warning on the 16-bin grid.
+
+Also: tests/jac_weight_check.sh + coag_kernel_check.sh exclude *_check.o driver
+objects from the link glob so the two test drivers don't collide on main().
+---
+ src/dust/dustevolution.f90  | 21 ++++++++--
+ src/gasgrain.f90            | 12 ++++--
+ tests/coag_brownian_gate.sh | 84 +++++++++++++++++++++++++++++++++++++
+ tests/coag_kernel_check.f90 | 66 +++++++++++++++++++++++++++++
+ tests/coag_kernel_check.sh  | 33 +++++++++++++++
+ tests/jac_weight_check.sh   |  4 +-
+ 6 files changed, 212 insertions(+), 8 deletions(-)
+ create mode 100755 tests/coag_brownian_gate.sh
+ create mode 100644 tests/coag_kernel_check.f90
+ create mode 100755 tests/coag_kernel_check.sh
+
+diff --git a/src/dust/dustevolution.f90 b/src/dust/dustevolution.f90
+index 6f58a1b..eca6242 100644
+--- a/src/dust/dustevolution.f90
++++ b/src/dust/dustevolution.f90
+@@ -216,8 +216,8 @@ subroutine dust_coagulation_set_rates()
+   real(double_precision) :: w1, w2
+   logical :: is_overflow
+ 
+-  if (constant_kernel_k0 <= 0.d0) then
+-    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for Rung 1.'
++  if (trim(coagulation_kernel) == 'constant' .and. constant_kernel_k0 <= 0.d0) then
++    write(error_unit,'(a)') 'Error (coagulation): constant_kernel_k0 must be > 0 for the constant kernel.'
+     call exit(31)
+   endif
+ 
+@@ -246,13 +246,28 @@ function coag_kernel(i, j) result(kern)
+   implicit none
+   integer, intent(in) :: i, j
+   real(double_precision) :: kern
++  real(double_precision) :: ai, aj, mu
+ 
+   select case (trim(coagulation_kernel))
+   case ('constant')
+     kern = constant_kernel_k0
++  case ('brownian')
++    ! Free-molecular (kinetic) Brownian coagulation kernel:
++    !   K_ij = pi (a_i+a_j)^2 <v_rel>,   <v_rel> = sqrt( 8 k_B T / (pi mu_ij) )
++    !        = (a_i+a_j)^2 * sqrt( 8 pi k_B T / mu_ij )        [cm^3 s^-1]
++    ! <v_rel> is the MEAN (not RMS) relative thermal speed of a Maxwell-Boltzmann
++    ! pair -- this fixes the prefactor convention. The gas is the momentum bath, so
++    ! T is the GAS temperature (grain surface temperature is a different quantity and
++    ! does not enter here). The reduced mass mu_ij = m_i m_j/(m_i+m_j) keeps the full
++    ! per-bin mass dependence: the single gas T only makes the temperature factor
++    ! common across pairs, it does NOT make the kernel uniform. p_stick = 1.
++    ai = grain_radii(i)
++    aj = grain_radii(j)
++    mu = mass_grid(i) * mass_grid(j) / (mass_grid(i) + mass_grid(j))
++    kern = (ai + aj)**2 * sqrt(8.d0 * PI * K_B * gas_temperature / mu)
+   case default
+     write(error_unit,'(3a)') 'Error (coagulation): unknown coagulation_kernel "', &
+-      trim(coagulation_kernel), '" (Rung 1 supports: constant).'
++      trim(coagulation_kernel), '" (v1 supports: constant, brownian).'
+     call exit(31)
+   end select
+   if (i == j) kern = 0.5d0 * kern             ! unordered self-pair counted once
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index 99277bd..5cfa7bd 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -124,9 +124,10 @@ call get_gas_surface_species()
+ ! Initialization of elemental/chemical quantities
+ call index_datas()
+ 
+-! Coagulation kernel coefficients. MUST follow index_datas -> init_reaction_rates
+-! (which sets chemistry rates and would otherwise leave/overwrite the coag slots).
+-if (coagulation) call dust_coagulation_set_rates()
++! Coagulation kernel coefficients are set below, once the gas temperature is
++! available (the Brownian kernel needs it). They only need to precede the first
++! RHS evaluation; nothing between here and there uses the coag rate VALUES (the
++! reaction coupling that drives sparsity comes from the resolved compound IDs).
+ 
+ ! Calculate the initial abundances for all elements that compose the species
+ ! Here it is assumed that all the cells in 1D have the same elemental abundances
+@@ -195,6 +196,11 @@ actual_dust_temp(:) = dust_temperature(:)
+ actual_av = visual_extinction
+ actual_gas_density = H_number_density
+ 
++! Coagulation kernel coefficients (constant, or Brownian using the gas temperature
++! just set above). Must follow index_datas -> init_reaction_rates (which would
++! otherwise overwrite the coag slots) and precede the first RHS evaluation.
++if (coagulation) call dust_coagulation_set_rates()
++
+ ! Write species name/index correspondance
+ call write_species()
+ 
+diff --git a/tests/coag_brownian_gate.sh b/tests/coag_brownian_gate.sh
+new file mode 100755
+index 0000000..ec4a8cd
+--- /dev/null
++++ b/tests/coag_brownian_gate.sh
+@@ -0,0 +1,84 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_brownian_gate.sh
++#
++# Integration gate for the free-molecular Brownian kernel. The Brownian kernel has
++# no clean closed-form total-number decay (unlike the constant kernel), so instead
++# of a full-trajectory analytic fit we assert:
++#
++#   Gate (a)  mass  Sum_k m_k n_k conserved to machine precision.
++#   Early slope  for a MONODISPERSE start (all grains in bin 1), the only initial
++#                channel is bin1+bin1, so the exact initial total-number rate is
++#                   dN/dt|_0 = -1/2 * K11_phys * nH * N0^2,
++#                   K11_phys = (2 a1)^2 * sqrt( 8 pi k_B T / (m1/2) ).
++#                Measured from the first two outputs; must match within 5%.
++#
++# This checks the kernel is correctly WIRED into the RHS (magnitude + the 1/2
++# self-pair factor + the nH density factor), complementing coag_kernel_check.sh,
++# which checks the kernel VALUE. Run from repo root; exit 0 = PASS.
++# ===========================================================================
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++
++echo "[coag_brownian_gate] building (-O0)..."
++make OPT=-O0 >/dev/null 2>&1
++
++RUN="$(mktemp -d)"
++trap 'rm -rf "$RUN"' EXIT
++cp tests/fixture_dust_coag/*.in "$RUN"/
++# Brownian kernel, monodisperse IC, early first outputs so the initial slope is clean.
++sed -i 's/^coagulation_kernel = constant/coagulation_kernel = brownian/; s/^dust_ic = MRN/dust_ic = monodisperse/; s/^start_time = .*/start_time =  1.000E-01/; s/^stop_time = .*/stop_time =  5.000E+03/; s/^nb_outputs = .*/nb_outputs = 25/' "$RUN"/parameters.in
++
++echo "[coag_brownian_gate] running in $RUN ..."
++( cd "$RUN" && "$ROOT/bin/nmgc" run >run.log 2>&1 )
++
++python3 - "$RUN" <<'PYEOF'
++import sys, math, collections
++RUN = sys.argv[1]
++rows = [l.split() for l in open(RUN+"/dust_distribution.out")
++        if not l.startswith("!") and l.strip()]
++byt = collections.OrderedDict()
++a1 = m1 = None
++for p in rows:
++    if len(p) < 9: continue
++    t = float(p[0]); d = byt.setdefault(t, {'num':0.0, 'mass':0.0})
++    d['num']  += float(p[4]); d['mass'] += float(p[5])
++    if int(p[1]) == 1 and a1 is None:
++        a1 = float(p[2]); m1 = float(p[3])
++
++P = {}
++for l in open(RUN+"/parameters.in"):
++    if '=' in l and not l.strip().startswith('!'):
++        k, v = l.split('=', 1); P[k.strip()] = v.split('!')[0].strip()
++T  = float(P['initial_gas_temperature']); nH = float(P['initial_gas_density'])
++kB = 1.3806488e-16; PI = math.pi; YR = 3.1556952e7
++
++times = list(byt)
++t0, t1 = times[0], times[1]
++N0, N1 = byt[t0]['num'], byt[t1]['num']
++m0 = byt[t0]['mass']
++mass_worst = max(abs(byt[t]['mass'] - m0)/m0 for t in times)
++
++# exact initial slope for a monodisperse (bin-1-only) start
++K11phys = (2*a1)**2 * math.sqrt(8*PI*kB*T/(m1/2.0))
++slope_analytic = -0.5 * K11phys * nH * N0**2
++slope_measured = (N1 - N0)/((t1 - t0)*YR)
++slope_relerr = abs(slope_measured - slope_analytic)/abs(slope_analytic)
++
++print("=================================================================")
++print(" Brownian coagulation gate (free molecular)")
++print("=================================================================")
++print(" gas T = %.2f K   nH = %.3e cm^-3   N/N0 end = %.4f"
++      % (T, nH, byt[times[-1]]['num']/N0))
++print(" gate (a) mass rel-err     = %.3e   (tol 1e-10)" % mass_worst)
++print(" early dN/dt|0 analytic    = %.6e /H/s" % slope_analytic)
++print(" early dN/dt|0 measured     = %.6e /H/s" % slope_measured)
++print(" early-slope rel-err        = %.3e   (tol 5e-2)" % slope_relerr)
++ok = (mass_worst < 1e-10) and (slope_relerr < 5e-2)
++print(" RESULT: %s" % ("PASS" if ok else "FAIL"))
++sys.exit(0 if ok else 1)
++PYEOF
++rc=$?
++echo "[coag_brownian_gate] $([ $rc -eq 0 ] && echo PASS || echo FAIL)"
++exit $rc
+diff --git a/tests/coag_kernel_check.f90 b/tests/coag_kernel_check.f90
+new file mode 100644
+index 0000000..8e7341b
+--- /dev/null
++++ b/tests/coag_kernel_check.f90
+@@ -0,0 +1,66 @@
++! ===========================================================================
++! tests/coag_kernel_check.f90
++!
++! Absolute check of the free-molecular Brownian coagulation kernel, to pin the
++! prefactor convention (the mean-vs-RMS relative-speed ambiguity). Initialises the
++! dust-only fixture with coagulation_kernel=brownian and compares coag_kernel(i,j)
++! for two specific pairs against values hand-computed OFFLINE for this exact grid
++! and temperature -- so a wrong prefactor (e.g. RMS speed, or a dropped/extra pi or
++! factor of 2) fails here even though it would still "look Brownian".
++!
++! Fixture (tests/coag_kernel_check.sh sets it): a1 = 1e-6 cm, mass_ratio = 2,
++! grain_density = 3 g/cm^3, gas T = 27.41 K. Then, with mu_ij = m_i m_j/(m_i+m_j),
++!   K_ij   = (a_i+a_j)^2 * sqrt( 8 pi k_B T / mu_ij )        [free molecular, MEAN speed]
++!   K(1,1) = 1/2 * K_11^phys  (self-pair counted once)
++! Hand-computed (k_B = 1.3806488e-16 cgs):
++!   K(1,1) = 2.4606855503e-10 cm^3/s
++!   K(1,2) = 5.4418089399e-10 cm^3/s
++! (The RMS-speed form would give K(1,2) ~ 5.907e-10, 8.5% high -- caught at 0.5%.)
++!
++! Build/run via tests/coag_kernel_check.sh. Expected: RESULT: PASS.
++! ===========================================================================
++program coag_kernel_check
++  use global_variables
++  use gasgrain
++  use dust_evolution
++  implicit none
++  real(double_precision) :: k11, k12, e11, e12, r11, r12, tol
++  integer :: nbug
++
++  call init_gasgrain()          ! reads the Brownian fixture from the working directory
++
++  e11 = 2.4606855503d-10        ! hand-computed absolute references (see header)
++  e12 = 5.4418089399d-10
++  tol = 5.d-3                    ! 0.5% -- tight enough to reject the RMS-speed prefactor
++
++  if (.not. coagulation) then
++    write(*,'(a)') ' RESULT: FAIL (coagulation is off -- fixture misconfigured)'
++    call exit(1)
++  endif
++  if (trim(coagulation_kernel) /= 'brownian') then
++    write(*,'(3a)') ' RESULT: FAIL (coagulation_kernel = "', trim(coagulation_kernel), '", expected brownian)'
++    call exit(1)
++  endif
++
++  k11 = coag_kernel(1,1)
++  k12 = coag_kernel(1,2)
++  r11 = abs(k11 - e11)/e11
++  r12 = abs(k12 - e12)/e12
++  nbug = 0
++  if (r11 > tol) nbug = nbug + 1
++  if (r12 > tol) nbug = nbug + 1
++
++  write(*,'(a)') '=================================================================='
++  write(*,'(a)') ' Brownian coagulation kernel absolute check (free molecular, mean speed)'
++  write(*,'(a)') '=================================================================='
++  write(*,'(a,f8.3,a)')                      ' gas temperature      = ', gas_temperature, ' K'
++  write(*,'(a,es16.8,a,es16.8,a,es9.2)') ' K(1,1) self : got ', k11, '  expect ', e11, '  relerr ', r11
++  write(*,'(a,es16.8,a,es16.8,a,es9.2)') ' K(1,2) cross: got ', k12, '  expect ', e12, '  relerr ', r12
++  write(*,'(a,es9.2)')                       ' tolerance            = ', tol
++  if (nbug == 0) then
++    write(*,'(a)') ' RESULT: PASS'
++  else
++    write(*,'(a)') ' RESULT: FAIL'
++    call exit(1)
++  endif
++end program coag_kernel_check
+diff --git a/tests/coag_kernel_check.sh b/tests/coag_kernel_check.sh
+new file mode 100755
+index 0000000..43f26cb
+--- /dev/null
++++ b/tests/coag_kernel_check.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_kernel_check.sh
++#
++# Builds and runs the Brownian-kernel absolute check (tests/coag_kernel_check.f90):
++# links the driver against the compiled module objects (everything in build/ except
++# main.o), initialises the dust-only fixture with coagulation_kernel=brownian, and
++# checks coag_kernel(i,j) for two pairs against hand-computed values. Run from repo
++# root:  ./tests/coag_kernel_check.sh   (exit 0 = PASS).
++# ===========================================================================
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++
++echo "[coag_kernel_check] building modules (-O0)..."
++make OPT=-O0 >/tmp/ckc_build.log 2>&1 || { echo "module build FAILED"; tail -30 /tmp/ckc_build.log; exit 3; }
++
++echo "[coag_kernel_check] compiling + linking driver..."
++gfortran -O0 -ffree-line-length-none -Jbuild -Ibuild -c tests/coag_kernel_check.f90 -o build/coag_kernel_check.o 2>>/tmp/ckc_build.log \
++  || { echo "driver compile FAILED"; tail -30 /tmp/ckc_build.log; exit 3; }
++OBJS="$(ls build/*.o build/dust/*.o 2>/dev/null | grep -vE 'build/main\.o|_check\.o' | tr '\n' ' ')"
++gfortran -O0 build/coag_kernel_check.o $OBJS -o bin/coag_kernel_check 2>>/tmp/ckc_build.log \
++  || { echo "driver link FAILED"; tail -30 /tmp/ckc_build.log; exit 3; }
++
++RUNDIR="$(mktemp -d)"
++trap 'rm -rf "$RUNDIR"' EXIT
++cp tests/fixture_dust_coag/*.in "$RUNDIR"/
++sed -i 's/^coagulation_kernel = constant/coagulation_kernel = brownian/' "$RUNDIR"/parameters.in
++
++echo "[coag_kernel_check] running in $RUNDIR ..."
++( cd "$RUNDIR" && "$ROOT/bin/coag_kernel_check" ) | tee /tmp/ckc_run.log
++grep -q "RESULT: PASS" /tmp/ckc_run.log
++echo "[coag_kernel_check] PASS"
+diff --git a/tests/jac_weight_check.sh b/tests/jac_weight_check.sh
+index 9a994dd..8f8e12a 100755
+--- a/tests/jac_weight_check.sh
++++ b/tests/jac_weight_check.sh
+@@ -23,8 +23,8 @@ make OPT=-O0 >/tmp/jwc_build.log 2>&1 || { echo "module build FAILED"; tail -30
+ echo "[jac_weight_check] compiling + linking driver..."
+ gfortran -O0 -ffree-line-length-none -Jbuild -Ibuild -c tests/jac_weight_check.f90 -o build/jac_weight_check.o 2>>/tmp/jwc_build.log \
+   || { echo "driver compile FAILED"; tail -30 /tmp/jwc_build.log; exit 3; }
+-OBJS="$(ls build/*.o build/dust/*.o 2>/dev/null | grep -v 'build/main.o' | tr '\n' ' ')"
+-gfortran -O0 $OBJS -o bin/jac_weight_check 2>>/tmp/jwc_build.log \
++OBJS="$(ls build/*.o build/dust/*.o 2>/dev/null | grep -vE 'build/main\.o|_check\.o' | tr '\n' ' ')"
++gfortran -O0 build/jac_weight_check.o $OBJS -o bin/jac_weight_check 2>>/tmp/jwc_build.log \
+   || { echo "driver link FAILED"; tail -30 /tmp/jwc_build.log; exit 3; }
+ 
+ RUNDIR="$(mktemp -d)"
+-- 
+2.43.0
+

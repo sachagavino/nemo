@@ -77,6 +77,16 @@ subroutine dust_grid_count_bins()
   nb_grains = int(dlog(m_max/m_min) / dlog(mass_ratio)) + 1
   if (nb_grains.lt.1) nb_grains = 1
 
+  if (nb_grains.gt.MAX_GRAINS_NAMEFMT) then
+    write(error_unit,*) 'Error (dust_grid, derived): grid has ', nb_grains, &
+      ' bins, exceeding the hard limit of ', MAX_GRAINS_NAMEFMT, '.'
+    write(error_unit,*) 'Species-name indices use a 2-digit format (I2.2); bins >= 100', &
+      ' overflow to GRAIN** and silently corrupt the grid (mass non-conservation).'
+    write(error_unit,*) 'Use a coarser grid: larger mass_ratio, or a narrower a_min..a_max.', &
+      ' (3-digit names are a v2 task.)'
+    call exit(31)
+  endif
+
   return
 end subroutine dust_grid_count_bins
 
@@ -184,6 +194,28 @@ subroutine dust_ic_mrn()
 
   return
 end subroutine dust_ic_mrn
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+!> @brief Monodisperse initial dust distribution: all grains in bin 1. This is
+!! the initial condition for the constant-kernel analytic coagulation gate, whose
+!! closed form N(t) = N0 / (1 + K0 N0 t / 2) assumes a single initial size.
+!! Empty bins get a huge GTODN so their abundance 1/GTODN is ~0.
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+subroutine dust_ic_monodisperse()
+
+  implicit none
+  integer :: k
+  real(double_precision) :: n1
+
+  ! sum_k n_k m_k = initial_dtg_mass_ratio * AMU (per H), all mass in bin 1
+  n1 = initial_dtg_mass_ratio * AMU / mass_grid(1)
+  GTODN_0D_temp(1) = 1.d0 / n1
+  do k=2,nb_grains
+    GTODN_0D_temp(k) = 1.d300   ! empty bin: abundance = 1/GTODN ~ 0
+  enddo
+
+  return
+end subroutine dust_ic_monodisperse
 
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 ! Small geometry helpers. m = (4/3) pi rho a^3.

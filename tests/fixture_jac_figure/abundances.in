@@ -1,0 +1,20 @@
+! Abundances relative to H nuclei -- reduced C/H/O network (jac_figure fixture).
+! = networks/reduced_CHO/abundances.in (unchanged gas budget) + two ice seeds at t0.
+! The ice seeds make nb_ice_ic>0 so dust_ice_place runs and the ice-transport block
+! carries non-zero VALUES. PURPOSE OF THE SEED: optional value checks only -- it lets
+! this fixture double as a value-check fixture later. It does NOT affect the symbolic
+! sparsity pattern, which is state-independent (built from the network + grid, not from
+! abundances); do not re-derive a "needed so the block is non-empty" rationale from it.
+! This is a STRUCTURAL fixture: absolute values are irrelevant
+! (§1 of the Phase III brief), and it is consumed by a read-only init-time pattern dump
+! that does NOT integrate. NB: a full time integration on this deliberately tiny 4-bin
+! (5-10 nm) grid loses grain+ice mass to the top-bin overflow sink (dropped-flux ~16%),
+! which trips the (integration-only) element-conservation caution; that is expected on a
+! legibility grid and does not affect the symbolic Jacobian pattern being dumped.
+H2          = 5.000000D-01 ! molecular hydrogen (carries all H nuclei)
+He          = 9.000000D-02 ! standard
+C+          = 1.700000D-04 ! carbon starts ionized
+O           = 2.400000D-04 ! oxygen atomic; C/O ~ 0.71
+e-          = 1.700000D-04 ! charge balance (~ C+); recomputed by conservation at init
+JCO         = 1.000000D-04 ! ice seed at t0 -> exercises dust_ice_place + ice-transport block
+JH2O        = 1.000000D-04 ! second ice base seeded so the placed ice spans >1 species

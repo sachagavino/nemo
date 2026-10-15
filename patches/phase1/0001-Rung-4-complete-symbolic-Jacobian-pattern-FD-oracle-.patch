@@ -1,0 +1,620 @@
+From 37303166a77da08118b9121d44375b1038d240c0 Mon Sep 17 00:00:00 2001
+From: NEMO Rung4 executor <executor@nemo.local>
+Date: Tue, 15 Sep 2026 10:39:30 +0000
+Subject: [PATCH 1/2] Rung 4: complete symbolic Jacobian pattern + FD oracle;
+ production stays analytic
+
+Plumbing only, no physics change. Completes the symbolic Jacobian sparsity
+pattern with the live-divisor block and adds the MOSS=0 FD-complete path as a
+verification oracle, while production coag-on remains mf=121 (analytic).
+
+Two findings drove the design (both confirmed by the design thread):
+- get_jacobian treats rate coefficients as constant, so d(rate)/dY(GRAIN_k) has
+  never reached Newton under mf=121; the Rung 3 section 4d claim is retracted (the
+  RHS is complete, so gates 3a/3b/3c stand).
+- The symbolic pattern was never consumed: MOSS=1 ignores the user IA/JA, so
+  numerical == symbolic was byte-identical by construction.
+
+The Rung 4 live divisor (monolayer count SUMLAY) is bounded by construction (its
+denominator is floored), so d(SUMLAY)/dY(GRAIN_k) -> 0 as a bin depletes: it is
+never the stiff -1/Y^2 reciprocal (that is the dynamic surface-rate GTODN, Rung
+5). Completing it is correct plumbing but yields no convergence payoff, and FD is
+~4x slower, so production keeps the analytic path; the FD-complete path is kept as
+the Rung 5 verification oracle.
+
+Changes:
+- global_variables: DECLARED_JAC_{ROW,COL}, NB_DECLARED_JAC_DEPS storage.
+- ode_solver: declare_jacobian_dependency (general non-reactant (row,col) facility,
+  reused by Rung 5); build_live_divisor_dependencies (GRAIN_RANK-keyed superset
+  populator); build_symbolic_sparsity merges declared deps before CSC;
+  assert_live_divisor_in_pattern (gate a static completeness check).
+- gasgrain: solver_method_flag (production 121; FD-complete 022 via NEMO_ORACLE_MF;
+  seam for Rung 5 to retarget coag-on to 021); oracle_mf_override;
+  MOSS=0-requires-symbolic guard; gate-a call.
+- main: mf from solver_method_flag; DLSODES step-stat accumulation + print (4-IV).
+- tests/coag_rung4_sparsity.sh: gate (a) completeness; gate (b) production-vs-oracle
+  same-answer + conservation at 20 bins; 4-IV timing.
+- docs: as-built outcome (option a, retractions, gate results).
+
+Gates (20-bin fiducial): (a) 12720 live-divisor entries present; (b) 121 vs 022
+agree <1% for ab>1e-8, conservation holds, complete pattern byte-inert under 121;
+3b/3c pass on production 121 (3b needs its slow-K0 points re-tuned above the 20-bin
+noise floor); 4-IV production ~28s vs FD oracle ~118s. Gate (c) retracted (bounded
+term). coag-off byte-identical to committed HEAD (equivalence.sh preserved).
+---
+ docs/PhaseII_rung4_sparsity_scale.md |  73 +++++++++++++-
+ src/gasgrain.f90                     |  73 ++++++++++++++
+ src/global_variables.f90             |   9 ++
+ src/main.f90                         |  25 ++++-
+ src/ode_solver.f90                   | 145 ++++++++++++++++++++++++++-
+ tests/coag_rung4_sparsity.sh         | 111 ++++++++++++++++++++
+ 6 files changed, 433 insertions(+), 3 deletions(-)
+ create mode 100755 tests/coag_rung4_sparsity.sh
+
+diff --git a/docs/PhaseII_rung4_sparsity_scale.md b/docs/PhaseII_rung4_sparsity_scale.md
+index 4f83535..58bc363 100644
+--- a/docs/PhaseII_rung4_sparsity_scale.md
++++ b/docs/PhaseII_rung4_sparsity_scale.md
+@@ -249,4 +249,75 @@ smoke test is fine as a sanity check; the full study is not this rung.
+ **Hand-off out of this rung:** green (a)–(d) plus a tractability report unlocks **Rung 5**
+ (analytic reciprocal Jacobian across the ~23 GTODN sites *and* the live divisor), which
+ reuses the declared-dependency facility built here and is verified against this rung's FD
+-path before production switches to `mf=021`.
+\ No newline at end of file
++path before production switches to `mf=021`.
++
++---
++
++## 8. Execution outcome (as-built)
++
++Two diagnoses during execution changed the plan; both were confirmed and endorsed by the
++design thread, which owns the corrections below.
++
++**Finding 1 — `get_jacobian` treats the rate coefficient as constant.** It never computes
++`d(rate)/dY(GRAIN_k)`. Under `mf=121` (MOSS=1/MITER=1) both structure and values flow
++through `get_jacobian`, so the live-divisor Jacobian entry has never reached Newton — in
++Rung 3 or here. The Rung 3 §4d claim ("numerical discovers `d(rate)/dY(GRAIN_k)`") is
++**retracted**. Rung 3 is not compromised: the RHS is complete, so 3a/3b/3c stand; only
++Newton's convergence efficiency was ever affected.
++
++**Finding 2 — the symbolic pattern was never wired into the solve.** Under MOSS=1 DLSODES
++derives structure from `get_jacobian` and ignores the user IA/JA in IWORK, so
++numerical≡symbolic was byte-identical *by construction*. Consuming the supplied pattern
++requires MOSS=0.
++
++**Decision — option (a): ship the plumbing, keep production analytic.** The Rung 4 live
++divisor is the monolayer count `SUMLAY(k) = ab_tot(k)/(Y(GRAIN_k0)+Y(GRAIN_k-))`, with the
++denominator **floored** (`ode_solver.f90` ~1550). The floor caps `SUMLAY`, so
++`d(SUMLAY)/dY(GRAIN_k) → 0` as a bin depletes — it is a **bounded** coupling, never the
++stiff `−1/Y²` reciprocal. That reciprocal is the *dynamic surface-rate GTODN* (~23 sites),
++which stays **frozen** at Rung 4 and is Rung 5's job. Consequences:
++
++- The full plumbing is built and kept: the general non-reactant `(row,col)` declared-
++  dependency facility (`declare_jacobian_dependency`), the live-divisor populator
++  (`build_live_divisor_dependencies`, GRAIN_RANK-keyed superset: every compound of every
++  bin-`k` reaction couples to `GRAIN_k0/GRAIN_k−`), MOSS=0 wiring, and the FD-complete
++  path (`mf=022`).
++- **Production coag-on stays `mf=121`** (analytic sparse Jacobian). The omitted live-
++  divisor entry is bounded, hence harmless at Rung 4; `121` is correct, converges better,
++  and is ~4× faster than FD-complete. Coag-off stays `121` (nmgc / equivalence.sh).
++- The FD-complete path is retained as the **Rung 5 verification oracle**, reached
++  explicitly via `NEMO_ORACLE_MF` (e.g. `NEMO_ORACLE_MF=22`), never the production default.
++  Rung 5 retargets production coag-on to `021` (analytic-complete) with `022` as the
++  oracle it is verified against. The selector (`solver_method_flag`) keeps that seam.
++
++**Gate 4-I retracted; replaced by a static structural check.** Byte-identity of
++numerical vs symbolic is vacuous under MOSS=1. Gate (a) is now a direct assertion that the
++live-divisor entries are present in the finalised symbolic CSC pattern
++(`assert_live_divisor_in_pattern`).
++
++**Gate results (20-bin fiducial grid).**
++- **(a) structural completeness — PASS.** 12720 live-divisor entries present in the pattern.
++- **(b) correctness at scale — PASS.** `mf=022`-complete integrates and conserves (3a) at
++  20 bins; production `121` vs oracle `022` agree to <1% for all species with abundance
++  >1e-8 (max 0.24% in a clean regime), zero species >1%. Under matched method (`121`) the
++  complete pattern is byte-identical to the pre-Rung-4 pattern (provably inert under
++  MOSS=1). Residual >1% differences are confined to the free electron at ~1e-14 (near-total
++  neutralisation; charge-balance residual at the FD-vs-analytic noise floor).
++- **(c) load-bearing convergence — RETRACTED.** It expected a convergence payoff from a
++  bounded (floored) term. Measured directly in a regime where the smallest bin depletes
++  ~10⁶×: completing the block gives no improvement (FD-complete NST/NFE/NJE/restarts
++  16938/289371/1004/11 vs FD-incomplete 16602/273114/950/7), and analytic `121` is fastest
++  and most robust (4 restarts, 28 s). This is the correct behaviour of a bounded term; the
++  payoff is a Rung 5 phenomenon (the stiff reciprocal).
++- **3b/3c at 20 bins — PASS on production `121`.** 3c (directional): dust-core mass and
++  surface ice both migrate to larger bins. 3b (slow-coag reduction): PASS with a caveat —
++  the gate's hard-coded slow-K0 points (5e-18/5e-19), tuned for the 3–5 bin fixture, fall
++  **below the 20-bin solver noise floor** (~rtol=1e-4), so the linearity ratio is
++  unresolved there; with K0 re-tuned above the floor (5e-16/5e-17) the reduction is linear
++  (rA/rB = 9.85 ≈ 10). Byte-identical to committed HEAD, so not a regression — the gate's
++  K0 constants need scaling for the finer grid (test-instrumentation follow-up, tracked for
++  the gate harness, not a code change).
++
++**Tractability (4-IV), 20-bin fiducial.** Production `mf=121` ≈ 28 s; FD-complete oracle
++`mf=022` ≈ 118 s (~4.2×). FD is the slow Jacobian, so this bounds Rung 5's analytic path
++from above: if the oracle is tractable, analytic certainly is.
+diff --git a/src/gasgrain.f90 b/src/gasgrain.f90
+index e0b24da..13870bc 100644
+--- a/src/gasgrain.f90
++++ b/src/gasgrain.f90
+@@ -237,10 +237,25 @@ call init_relevant_reactions()
+ !! the jacobian
+ call count_nonzeros()
+ 
++! Require the complete symbolic pattern only when the selected method actually consumes
++! a user-supplied pattern (MOSS=0: mf < 100 -- the FD-complete oracle 022 or Rung 5's
++! analytic-complete 021). Production ships 121 (MOSS=1), which discovers structure from
++! get_jacobian and ignores the supplied pattern, so coag-on+121 runs fine with numerical
++! (e.g. the 3b/3c physics gates on the fixture). The numerical pattern omits the
++! live-divisor block, so it cannot serve as the MOSS=0 basis; symbolic is required there.
++if (coagulation .and. solver_method_flag().lt.100 .and. sparsity.ne.'symbolic') then
++  write(Error_unit,'(a)') 'FATAL: this solver method supplies the sparsity pattern (MOSS=0) '// &
++    'and requires sparsity = symbolic (the numerical pattern omits the live-divisor block).'
++  stop 1
++endif
++
+ ! In symbolic mode, build the fixed sparsity superset once from the reaction list
+ ! (also raises nb_nonzeros_values to the symbolic per-column max for work sizing).
+ if (sparsity.eq.'symbolic') call build_symbolic_sparsity()
+ 
++! Rung 4 gate (a): assert the live-divisor block made it into the symbolic pattern.
++if (coagulation .and. sparsity.eq.'symbolic') call assert_live_divisor_in_pattern()
++
+ 
+ ! Do preliminary tests, before starting the integration
+ ! Writing information in 'info.out'
+@@ -267,6 +282,64 @@ call flush(stdo)
+ 
+ end subroutine init_gasgrain
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief DLSODES method flag. Production ships 121 (analytic sparse Jacobian,
++!! MOSS=1/MITER=1) for both coag-off and coag-on; the FD-complete path (022) is a
++!! verification oracle reached only via the NEMO_ORACLE_MF environment variable.
++!!
++!! coag OFF -> 121. Grains frozen, live divisor inactive; also reproduces nmgc-2.0
++!!   bit-for-bit (equivalence.sh), which MOSS=0/MITER=2 would break.
++!! coag ON  -> 121 (Rung 4). The only live grain-abundance coupling is the monolayer
++!!   divisor SUMLAY, which is BOUNDED by construction (floored, see ode_solver.f90
++!!   ~1550), so its Jacobian derivative -> 0 as a bin depletes -- it is never the
++!!   stiff -1/Y^2 reciprocal. The entry get_jacobian omits is therefore harmless at
++!!   Rung 4: 121 is correct, converges better, and ~4x faster than FD-complete.
++!!   Rung 5 retargets THIS branch to 021 (analytic-complete) once the reciprocal
++!!   GTODN entries are added to get_jacobian, keeping 022 as the oracle it is
++!!   verified against.
++!!
++!! Oracle override: NEMO_ORACLE_MF forces the flag (e.g. 22 = FD-complete: MOSS=0 +
++!!   complete symbolic pattern + MITER=2). Intended for the gate/oracle harness with
++!!   coagulation on and sparsity=symbolic; never set in production configs.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++integer function solver_method_flag()
++use global_variables
++implicit none
++integer :: oracle
++
++oracle = oracle_mf_override()
++if (oracle.ne.0) then
++  solver_method_flag = oracle
++  return
++endif
++
++if (coagulation) then
++  solver_method_flag = 121   ! Rung 5: retarget to 021 (analytic-complete)
++else
++  solver_method_flag = 121
++endif
++
++return
++end function solver_method_flag
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Read the NEMO_ORACLE_MF environment variable (verification/test only).
++!! Returns 0 when unset/blank/unparseable (production default), else the forced mf.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++integer function oracle_mf_override()
++implicit none
++character(len=32) :: v
++integer :: ln, st, val
++
++oracle_mf_override = 0
++call get_environment_variable('NEMO_ORACLE_MF', v, ln, st)
++if (st.ne.0 .or. ln.le.0) return
++read(v, *, iostat=st) val
++if (st.eq.0) oracle_mf_override = val
++
++return
++end function oracle_mf_override
++
+ 
+ 
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+diff --git a/src/global_variables.f90 b/src/global_variables.f90
+index ede715e..0eb2cec 100644
+--- a/src/global_variables.f90
++++ b/src/global_variables.f90
+@@ -471,6 +471,15 @@ integer, allocatable, dimension(:) :: IA_SYM !< dim(nb_species+1) column pointer
+ integer, allocatable, dimension(:) :: JA_SYM !< row indices of the symbolic pattern (CSC), ascending within each column
+ integer :: NNZ_SYM = 0                        !< number of nonzeros in the symbolic pattern
+ integer :: n_sparsity_checks_done = 0         !< how many startup subset-asserts have run
++! Declared non-reactant Jacobian dependencies (Rung 4). These are (row,col) couplings
++! that do NOT arise from a reaction's reactant/product list -- e.g. a surface rate that
++! reads the live monolayer divisor SUMLAY(k) depends on Y(GRAIN_k0)/Y(GRAIN_k-) although
++! GRAIN_k is not a reactant of that reaction. build_symbolic_sparsity merges these into
++! the pattern before the CSC is finalised. Duplicates are allowed (deduped downstream).
++! Kept general so Rung 5's reciprocal GTODN entries reuse the same facility.
++integer, allocatable, dimension(:) :: DECLARED_JAC_ROW !< rows of declared non-reactant Jacobian couplings
++integer, allocatable, dimension(:) :: DECLARED_JAC_COL !< cols (differentiation variable) of declared couplings
++integer :: NB_DECLARED_JAC_DEPS = 0          !< number of declared couplings currently registered
+ 
+ ! Diffusion and 1D variables
+ real(double_precision) :: X_IONISATION_RATE !< Ionisation rate due to X-rays [s-1]
+diff --git a/src/main.f90 b/src/main.f90
+index 08eca4f..2eb5240 100644
+--- a/src/main.f90
++++ b/src/main.f90
+@@ -58,7 +58,7 @@ PROGRAM nmgc
+   integer :: itask = 1 !< ITASK = 1 for normal computation of output values of Y at t = TOUT.
+   integer :: istate = 1 !< ISTATE = integer flag (input and output). Set ISTATE = 1.
+   integer :: iopt = 1 !< IOPT = 1 to indicate optional inputs are used.
+-  integer :: mf = 121 !< method flag. 121: stiff (BDF) method, user-supplied sparse Jacobian
++  integer :: mf !< DLSODES method flag; set by solver_method_flag() after init (production 121; FD-complete 022 only via NEMO_ORACLE_MF)
+   real(double_precision) :: atol = 1.d-99 !< absolute tolerance parameter
+ 
+   real(double_precision) :: output_timestep !< Timestep to reach the next output time [s]
+@@ -70,6 +70,12 @@ PROGRAM nmgc
+   real(double_precision) :: code_start_time, code_current_time, code_elapsed_time
+   real(double_precision) :: remaining_time !< estimated remaining time [s]
+ 
++  ! Rung 4 solver characterization (4-IV cost + convergence effort): accumulated across all DLSODES calls.
++  integer(kind=8) :: tot_nst = 0  !< total accepted steps (IWORK(11))
++  integer(kind=8) :: tot_nfe = 0  !< total RHS evaluations (IWORK(12))
++  integer(kind=8) :: tot_nje = 0  !< total Jacobian evals / LU decompositions (IWORK(13))
++  integer(kind=8) :: tot_fail = 0 !< number of DLSODES calls returning istate /= 2
++
+   integer :: i, ic_i !< For loops
+   character(2) :: c_i !< to convert the grain rank encoded in a species name into an integer
+   logical :: gotit, quit
+@@ -94,6 +100,9 @@ PROGRAM nmgc
+ 
+     call init_gasgrain()
+ 
++    ! Select the DLSODES method flag now that the coagulation switch is known.
++    mf = solver_method_flag()
++
+     call initialize_work_arrays()
+ 
+     ! ---- list of output times
+@@ -262,6 +271,14 @@ PROGRAM nmgc
+ 
+     call write_abundances('abundances.tmp')
+ 
++    ! Rung 4 solver characterization (4-IV cost + convergence effort; oracle vs production).
++    write(stdo,'(a)')    ' --- DLSODES solver statistics (Rung 4 characterization) ---'
++    write(stdo,'(a,i0)') '   method flag mf              = ', mf
++    write(stdo,'(a,i0)') '   steps        NST            = ', tot_nst
++    write(stdo,'(a,i0)') '   RHS evals    NFE            = ', tot_nfe
++    write(stdo,'(a,i0)') '   Jac/LU evals NJE            = ', tot_nje
++    write(stdo,'(a,i0)') '   solver restarts (istate/=2) = ', tot_fail
++
+   elseif (do_outputs) then
+     inquire(file='abundances.out', exist=isDefined)
+     if (.not.isDefined) then
+@@ -333,8 +350,14 @@ PROGRAM nmgc
+       call dlsodes(get_temporal_derivatives,nb_species,temp_abundances,t,t_stop_step,i_tol,RELATIVE_TOLERANCE,&
+       satol,i_task,i_state,i_opt,rwork,lrw,iwork,liw,get_jacobian,m_f)
+ 
++      ! Accumulate DLSODES step statistics (reset by set_work_arrays each call, so read now).
++      tot_nst = tot_nst + int(iwork(11), 8)
++      tot_nfe = tot_nfe + int(iwork(12), 8)
++      tot_nje = tot_nje + int(iwork(13), 8)
++
+       ! Whenever the solver fails converging, print the reason.
+       if (i_state.ne.2) then
++        tot_fail = tot_fail + 1
+         write(*,*) 'ISTATE = ', I_STATE
+       endif
+ 
+diff --git a/src/ode_solver.f90 b/src/ode_solver.f90
+index 705c78b..97d4ba6 100644
+--- a/src/ode_solver.f90
++++ b/src/ode_solver.f90
+@@ -194,7 +194,7 @@ subroutine build_symbolic_sparsity()
+ use global_variables
+ implicit none
+ 
+-integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol
++integer :: r, s, ncoup, m, no_species, jcol, irow, curcol, c_prev, jj, cnt, maxcol, d
+ integer(kind=8) :: N1
+ integer(kind=8), allocatable :: keys(:)
+ integer, dimension(MAX_COMPOUNDS) :: reac, comp
+@@ -203,6 +203,13 @@ integer :: nreac, ncomp, a, b
+ no_species = nb_species + 1
+ N1 = int(nb_species, 8) + 1_8
+ 
++! Register declared non-reactant Jacobian couplings (the live-divisor block) before we
++! size the key list. Only active with coagulation: with grains frozen the monolayer
++! divisor is constant, so d(rate)/dY(GRAIN_k) is identically zero and no extra coupling
++! exists. This is the same facility Rung 5 will reuse for the reciprocal GTODN entries.
++NB_DECLARED_JAC_DEPS = 0
++if (coagulation) call build_live_divisor_dependencies()
++
+ ! ---- pass 1: upper-bound the number of couplings (duplicates allowed) ----
+ ncoup = nb_species                                  ! the diagonal
+ do r=1,nb_reactions
+@@ -215,6 +222,7 @@ do r=1,nb_reactions
+   enddo
+   ncoup = ncoup + nreac*ncomp
+ enddo
++ncoup = ncoup + NB_DECLARED_JAC_DEPS               ! declared non-reactant couplings
+ 
+ allocate(keys(ncoup))
+ 
+@@ -241,6 +249,10 @@ do r=1,nb_reactions
+     enddo
+   enddo
+ enddo
++do d=1,NB_DECLARED_JAC_DEPS                          ! declared non-reactant couplings
++  m = m + 1
++  keys(m) = int(DECLARED_JAC_COL(d),8)*N1 + int(DECLARED_JAC_ROW(d),8)
++enddo
+ do irow=1,nb_species                                ! diagonal
+   m = m + 1
+   keys(m) = int(irow,8)*N1 + int(irow,8)
+@@ -339,6 +351,137 @@ contains
+ 
+ end subroutine build_symbolic_sparsity
+ 
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief General facility: register a Jacobian coupling (row,col) that does NOT
++!! come from a reaction's reactant/product list, so build_symbolic_sparsity will
++!! include it in the pattern. Duplicates are allowed; they are deduped when the
++!! CSC pattern is built. Out-of-range indices are ignored. Rung 4 uses this for
++!! the live-divisor entries; Rung 5 reuses it for the reciprocal GTODN entries.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine declare_jacobian_dependency(irow, icol)
++use global_variables
++implicit none
++integer, intent(in) :: irow, icol
++integer, allocatable :: tmp(:)
++integer :: cap
++
++if (irow.lt.1 .or. irow.gt.nb_species .or. icol.lt.1 .or. icol.gt.nb_species) return
++
++if (.not.allocated(DECLARED_JAC_ROW)) then
++  allocate(DECLARED_JAC_ROW(64)) ; allocate(DECLARED_JAC_COL(64))
++  NB_DECLARED_JAC_DEPS = 0
++endif
++
++cap = size(DECLARED_JAC_ROW)
++if (NB_DECLARED_JAC_DEPS.ge.cap) then
++  allocate(tmp(2*cap)) ; tmp(1:cap) = DECLARED_JAC_ROW ; call move_alloc(tmp, DECLARED_JAC_ROW)
++  allocate(tmp(2*cap)) ; tmp(1:cap) = DECLARED_JAC_COL ; call move_alloc(tmp, DECLARED_JAC_COL)
++endif
++
++NB_DECLARED_JAC_DEPS = NB_DECLARED_JAC_DEPS + 1
++DECLARED_JAC_ROW(NB_DECLARED_JAC_DEPS) = irow
++DECLARED_JAC_COL(NB_DECLARED_JAC_DEPS) = icol
++
++return
++end subroutine declare_jacobian_dependency
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Rung 4 populator: declare the live-divisor Jacobian couplings. Any
++!! reaction associated with grain bin k (GRAIN_RANK(r)=k) may have a surface rate
++!! that reads the live monolayer divisor SUMLAY(k) = ab_tot(k)/(Y(GRAIN_k0)+Y(GRAIN_k-)),
++!! making its rate depend on both grain charge states. We take the safe superset
++!! (design decision): every compound of every bin-k reaction couples to GRAIN_k0
++!! and GRAIN_k-. This is a strict superset of the true SUMLAY-reading set
++!! (accretion of H/H2 via sticking, photodesorption types 66/67 via the monolayer
++!! cap); extra structural zeros are harmless and robust to later rate changes.
++!! The entries are unconditional on floor state -- the pattern is about which
++!! entries CAN be nonzero, not their value at any given state.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine build_live_divisor_dependencies()
++use global_variables
++implicit none
++integer :: r, s, k, sid
++
++NB_DECLARED_JAC_DEPS = 0
++
++do r=1,nb_reactions
++  k = GRAIN_RANK(r)
++  if (k.lt.1 .or. k.gt.nb_grains) cycle
++  if (INDGRAIN(k).lt.1) cycle
++  do s=1,MAX_COMPOUNDS
++    sid = REACTION_COMPOUNDS_ID(s,r)
++    if (sid.lt.1 .or. sid.gt.nb_species) cycle
++    call declare_jacobian_dependency(sid, INDGRAIN(k))
++    if (INDGRAIN_MINUS(k).ge.1) call declare_jacobian_dependency(sid, INDGRAIN_MINUS(k))
++  enddo
++enddo
++
++return
++end subroutine build_live_divisor_dependencies
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++!> @brief Rung 4 gate (a): STATIC structural-completeness check. Verify directly
++!! that every live-divisor coupling is present in the finalised symbolic CSC
++!! pattern (IA_SYM/JA_SYM). This is a direct pattern check -- it certifies that
++!! the declared entries survived the sort/dedup/CSC pipeline and the INDGRAIN
++!! indexing, independently of any run. Replaces the retracted byte-identity 4-I.
++!! Fatal if any entry is missing.
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++subroutine assert_live_divisor_in_pattern()
++use global_variables
++use iso_fortran_env, only: error_unit
++implicit none
++integer :: r, s, k, sid, c, col, p, nchk, nmiss
++logical :: found
++
++if (.not.coagulation) return
++if (sparsity.ne.'symbolic') return
++if (.not.allocated(IA_SYM)) then
++  write(error_unit,*) 'FATAL (gate a): symbolic pattern not built before completeness check.'
++  stop 1
++endif
++
++nchk = 0 ; nmiss = 0
++do r=1,nb_reactions
++  k = GRAIN_RANK(r)
++  if (k.lt.1 .or. k.gt.nb_grains) cycle
++  do s=1,MAX_COMPOUNDS
++    sid = REACTION_COMPOUNDS_ID(s,r)
++    if (sid.lt.1 .or. sid.gt.nb_species) cycle
++    do c=1,2
++      if (c.eq.1) then
++        col = INDGRAIN(k)
++      else
++        col = INDGRAIN_MINUS(k)
++      endif
++      if (col.lt.1) cycle
++      found = .false.
++      do p=IA_SYM(col), IA_SYM(col+1)-1
++        if (JA_SYM(p).eq.sid) then
++          found = .true. ; exit
++        endif
++      enddo
++      nchk = nchk + 1
++      if (.not.found) then
++        nmiss = nmiss + 1
++        if (nmiss.le.10) write(error_unit,'(a,i0,a,i0,a)') &
++          '   missing live-divisor entry (row=', sid, ', col=', col, ')'
++      endif
++    enddo
++  enddo
++enddo
++
++if (nmiss.gt.0) then
++  write(error_unit,'(a,i0,a,i0,a)') 'FATAL (gate a): symbolic pattern missing ', nmiss, &
++    ' of ', nchk, ' live-divisor entries.'
++  stop 1
++endif
++write(*,'(a,i0,a)') ' (gate a) live-divisor structural completeness: PASS (', nchk, &
++  ' entries present in symbolic pattern).'
++
++return
++end subroutine assert_live_divisor_in_pattern
++
+ !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ !> @brief Debug guard: assert every numerically-nonzero Jacobian entry at the
+ !! current state lies inside the symbolic pattern. By construction it must, so
+diff --git a/tests/coag_rung4_sparsity.sh b/tests/coag_rung4_sparsity.sh
+new file mode 100755
+index 0000000..8d63314
+--- /dev/null
++++ b/tests/coag_rung4_sparsity.sh
+@@ -0,0 +1,111 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# tests/coag_rung4_sparsity.sh  --  Rung 4 acceptance: symbolic pattern completeness
++#                                   + FD-complete oracle correctness at the 20-bin grid
++#
++# Rung 4 is plumbing: complete the symbolic Jacobian pattern (the live-divisor block),
++# wire MOSS=0, and keep the FD-complete path (mf=022) as the Rung 5 verification oracle.
++# Production ships mf=121 (analytic); the omitted live-divisor entry is BOUNDED (floored
++# SUMLAY), so it is harmless at Rung 4. This gate checks:
++#
++#   (a) structural completeness  -- the live-divisor entries are in the symbolic pattern
++#                                   (the code's own static assert_live_divisor_in_pattern).
++#   (b) correctness at scale     -- production (121) and the FD-complete oracle (022)
++#                                   integrate the SAME RHS to the SAME solution at 20 bins:
++#                                   same answer for meaningful species (<1% for ab>1e-8),
++#                                   and neither run reports an elemental-conservation drift.
++#   4-IV tractability            -- report both wall timings (022 is the slow upper bound).
++#
++# The FD-complete oracle is reached with NEMO_ORACLE_MF=22 (never a production default).
++# Run from repo root; exit 0 = PASS. NOTE: the 022 oracle run is ~1-2 min at 20 bins.
++#
++# (Gate (c) "load-bearing convergence improvement" is retracted: the live divisor is
++#  bounded by the SUMLAY floor, so it is not the stiff -1/Y^2 reciprocal -- that is the
++#  dynamic surface-rate GTODN, which is Rung 5. See docs/PhaseII_rung4_sparsity_scale.md
++#  section 8. 3b/3c physics gates run separately on production mf=121.)
++# ===========================================================================
++set -uo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
++echo "[r4] building (-O0)..."; make OPT=-O0 >/tmp/r4_b.log 2>&1 || { echo build FAIL; tail -20 /tmp/r4_b.log; exit 3; }
++
++WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
++
++# 20-bin fiducial grid (a_max = 0.5 um) on the Rung 3 fixture; coag on, symbolic.
++mkcfg() { # $1=dir  $2..=extra sed exprs
++  local d="$1"; shift; mkdir -p "$d"
++  cp networks/reduced_CHO/*.in "$d"/; cp inputs/element.in "$d"/
++  sed -e 's/^a_max = .*/a_max =  5.000E-05/' \
++      -e 's/^coagulation = .*/coagulation = 1/' \
++      -e 's/^sparsity = .*/sparsity = symbolic/' \
++      tests/fixture_rung3/parameters.in > "$d"/parameters.in
++}
++runwall() { # $1=dir  $2=env  -> echoes wall seconds, leaves run.log
++  local d="$1" e="$2" t0 t1
++  t0=$(date +%s); ( cd "$d" && env $e "$ROOT/bin/nmgc" run >run.log 2>&1 ); local rc=$?
++  t1=$(date +%s); echo $((t1-t0))
++  return $rc
++}
++
++echo "[r4] production run (mf=121) at 20 bins..."
++mkcfg "$WORK/prod"
++w121=$(runwall "$WORK/prod" "DUMMY=1") || { echo "prod run FAIL"; tail -5 "$WORK/prod/run.log"; exit 1; }
++
++echo "[r4] FD-complete oracle run (NEMO_ORACLE_MF=22) at 20 bins... (~1-2 min)"
++mkcfg "$WORK/oracle"
++w022=$(runwall "$WORK/oracle" "NEMO_ORACLE_MF=22") || { echo "oracle run FAIL"; tail -5 "$WORK/oracle/run.log"; exit 1; }
++
++FAIL=0
++
++echo "=================================================================="
++# ---- (a) structural completeness: the code's own static assert ----
++if grep -q "(gate a) live-divisor structural completeness: PASS" "$WORK/oracle/run.log"; then
++  echo " (a) structural completeness : PASS  ($(grep -o '[0-9]\+ entries' "$WORK/oracle/run.log" | head -1))"
++else
++  echo " (a) structural completeness : FAIL  (assert_live_divisor_in_pattern did not pass)"; FAIL=1
++fi
++
++# ---- confirm the two runs used the intended methods ----
++m121=$(grep -m1 "method flag mf" "$WORK/prod/run.log"   | grep -o '[0-9]\+$')
++m022=$(grep -m1 "method flag mf" "$WORK/oracle/run.log" | grep -o '[0-9]\+$')
++echo " methods                     : production mf=${m121:-?} , oracle mf=${m022:-?}"
++[ "${m121:-0}" = "121" ] || { echo "   production is not 121!"; FAIL=1; }
++[ "${m022:-0}" = "22"  ] || { echo "   oracle is not 22!"; FAIL=1; }
++
++# ---- conservation: neither run may report an elemental drift ----
++if grep -qiE "not conserved" "$WORK/prod/run.log" "$WORK/oracle/run.log"; then
++  echo " conservation (3a)           : FAIL  (elemental drift reported)"; FAIL=1
++else
++  echo " conservation (3a)           : PASS  (no elemental drift in either run)"
++fi
++
++# ---- (b) same answer: production 121 vs oracle 022 ----
++python3 - "$WORK/prod/abundances.out" "$WORK/oracle/abundances.out" <<'PY'
++import sys, struct
++def load(p):
++    d=open(p,'rb').read();pos=0;o=[]
++    def r(d,p):
++        (n,)=struct.unpack_from("<i",d,p);p+=4;pl=d[p:p+n];p+=n;p+=4;return pl,p
++    while pos<len(d):
++        _,pos=r(d,pos);_,pos=r(d,pos);a,pos=r(d,pos);o.append(struct.unpack("<%dd"%(len(a)//8),a))
++    return o
++a=load(sys.argv[1]); b=load(sys.argv[2])
++mx=0.0; nd=0
++for ra,rb in zip(a,b):
++    for x,y in zip(ra,rb):
++        s=max(abs(x),abs(y))
++        if s>1e-8:
++            rr=abs(x-y)/s
++            if rr>0.01: nd+=1
++            if rr>mx: mx=rr
++ok = (mx < 0.01)
++print(" (b) same answer (ab>1e-8)   : %s  (max rel diff %.2e vs 121 ; species >1%% = %d)"
++      % ("PASS" if ok else "FAIL", mx, nd))
++sys.exit(0 if ok else 7)
++PY
++[ $? -eq 0 ] || FAIL=1
++
++# ---- 4-IV tractability ----
++echo " 4-IV timing (20 bins)       : production mf=121 ~${w121}s ; FD-complete oracle mf=022 ~${w022}s (upper bound)"
++echo "=================================================================="
++
++if [ "$FAIL" -eq 0 ]; then echo "[r4] PASS"; exit 0; else echo "[r4] FAIL"; exit 1; fi
+-- 
+2.43.0
+
